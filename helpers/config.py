@@ -38,6 +38,9 @@ DIM_COLBERT = 128  # colbertv2.0 token dimension
 
 # Retrieval defaults. Small top-k so duplicates actually crowd out unique chunks (fix #1).
 TOP_K = 5
+# The panel shows deeper than the agent reads, so the audience can see the right doc
+# sitting below the cutoff (cold open: 8 stale steel-gen5 copies, current gen6 at rank 9).
+PANEL_K = 10
 
 # Generator (strict grounding prompt lives in agent.py).
 GENERATOR_MODEL = "claude-haiku-4-5"

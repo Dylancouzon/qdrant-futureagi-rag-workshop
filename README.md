@@ -24,11 +24,11 @@ FI_API_KEY
 FI_SECRET_KEY
 ```
 
-Requires Qdrant Cloud v1.18+.
+Create a free cluster at [Qdrant Cloud](https://cloud.qdrant.io) (v1.18+) and put its URL and API key in `.env`.
 
 ## Build Or Restore
 
-The shared cluster is already prepared. For a fresh cluster:
+On a fresh cluster:
 
 ```bash
 uv run python ingest.py   # intentionally flawed baseline + pokemon_viz
@@ -41,7 +41,7 @@ After a rehearsal, notebook run, or destructive verification:
 uv run python snapshot.py restore
 ```
 
-`restore` prefers the cluster snapshot and falls back to the newest local `data/{collection}-*.snapshot`. On the shared cluster the snapshot already exists, so no local snapshot file is needed. Use `snapshot.py download` to save cluster snapshots locally and `snapshot.py backup` to snapshot the current cluster state. Snapshot files are gitignored.
+`restore` prefers the cluster snapshot that `prep.py` created and falls back to the newest local `data/{collection}-*.snapshot`. Use `snapshot.py download` to save cluster snapshots locally and `snapshot.py backup` to snapshot the current cluster state. Snapshot files are gitignored.
 
 After restore, confirm the app starts from the broken baseline:
 
@@ -54,8 +54,9 @@ cat data/.retrieval_state.json
 
 ```bash
 uv run streamlit run app.py
-uv run jupyter lab workshop.ipynb
 ```
+
+Open `workshop.ipynb` in your IDE and select the `.venv` kernel.
 
 Use the app for audience-facing questions. Use the notebook to apply each fix. The app reads the file-backed retrieval switch on every question, so notebook changes show up on the next app request.
 
@@ -112,7 +113,7 @@ The retrieval mode is controlled by `agent.set_retrieval(...)` and persisted in 
 
 1. **Dedup**: delete duplicate points. Top-5 duplicate rate drops 0.67 → 0.00; `pokemon_webinar` shrinks 22.9k → 8.4k points.
 2. **Embedding migration**: add `bge-large` as a named vector, A/B against MiniLM, then commit. Clone-crowded recall moves 0.64 → 1.00.
-3. **Hybrid + rerank**: dense + sparse prefetch, RRF fusion, ColBERT rerank in one `query_points` call. Hard paraphrase recall moves 0.83 → 1.00.
+3. **Hybrid + rerank**: dense + sparse prefetch, RRF fusion, ColBERT rerank in one `query_points` call. Hard paraphrase recall moves 0.78 → 0.89.
 4. **Freshness filter**: `is_current` removes the stale type-chart document that retrieval improvements cannot beat.
 
 Local FastEmbed models: `all-MiniLM-L6-v2`, `BAAI/bge-large-en-v1.5`, `Qdrant/minicoil-v1`, `colbert-ir/colbertv2.0`.

@@ -6,7 +6,7 @@ Every document is a dict with exactly these keys (the payload schema from CLAUDE
     generation  int 1..9 — the generation the document's facts describe
     intro_gen   int 1..9 — the generation the species entered the Pokedex (1 for
                 type-chart docs). The scaling curve stages real growth on this.
-    doc_type    "flavor" | "types" | "stats" | "type_chart"
+    doc_type    "pokedex_entry" | "types" | "stats" | "type_chart"
     sprite_url  front sprite (empty for type_chart docs)
     text        the searchable/citable text
     is_current  False for a superseded types/type_chart snapshot, True otherwise. The
@@ -41,10 +41,10 @@ def _flavor_docs(pkmn: dict, species: dict) -> list[dict]:
         seen_per_gen[gen] = text
     return [
         {
-            "doc_id": f"{name}-gen{gen}-flavor",
+            "doc_id": f"{name}-gen{gen}-entry",
             "name": name,
             "generation": gen,
-            "doc_type": "flavor",
+            "doc_type": "pokedex_entry",
             "sprite_url": sprite,
             "text": f"{name.capitalize()}: {text}",
         }
@@ -214,5 +214,5 @@ if __name__ == "__main__":
     print(f"corpus: {len(corpus)} docs  {by_type}")
     print(f"docs by intro_gen: {dict(sorted(by_gen.items()))}")
     for did in ["magnemite-gen1-types", "magnemite-gen2-types",
-                "typechart-steel-gen5", "drowzee-gen1-flavor"]:
+                "typechart-steel-gen5", "drowzee-gen1-entry"]:
         print(" ", next(d["text"] for d in corpus if d["doc_id"] == did))

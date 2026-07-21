@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import html
 
+from helpers import config
+
 POKEDEX_CSS = """
 <style>
   .dex-top { background: linear-gradient(#d92626, #b30000); border: 3px solid #7a0000;
@@ -55,6 +57,8 @@ POKEDEX_CSS = """
     border-radius: 6px; padding: 1px 8px; font-size: 13px; }
   .dup-badge { background: #e08a00; color: #ffffff; border-radius: 6px; padding: 1px 8px;
     font-size: 13px; font-weight: 700; }
+  .cutoff { text-align: center; font-size: 13px; font-weight: 700; color: #7a0000;
+    border-top: 2px dashed #b30000; margin: 4px 2px 10px; padding-top: 4px; }
   .docid { font-family: ui-monospace, monospace; font-size: 13px; color: #55607a; }
   .chunk-text { font-size: 15px; color: #1a1a2e; margin: 3px 0 5px; }
   .score-row { display: flex; align-items: center; gap: 8px; }
@@ -62,6 +66,16 @@ POKEDEX_CSS = """
   .score-fill { height: 100%; background: #30a14e; }
   .score-num { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 700;
     color: #1a1a2e; }
+
+  details.chunk-wrap > summary { list-style: none; cursor: pointer; }
+  details.chunk-wrap > summary::-webkit-details-marker { display: none; }
+  details.chunk-wrap > summary .chunk-card:hover { box-shadow: 0 2px 6px rgba(42,58,94,.25); }
+  .full-card { background: #f7fafc; border: 2px solid #2a3a5e; border-radius: 10px;
+    margin: -4px 0 10px; padding: 12px 14px; display: grid;
+    grid-template-columns: 96px 1fr; gap: 14px; align-items: start; }
+  .sprite-lg { width: 96px; height: 96px; image-rendering: pixelated; }
+  .full-line { font-size: 14px; color: #1a1a2e; margin: 4px 0; }
+  .full-label { font-weight: 800; color: #2a3a5e; margin-right: 6px; }
 </style>
 """
 
@@ -72,18 +86,18 @@ HEADER_HTML = (
 )
 
 
-def _card(chunk: dict, is_dup: bool) -> str:
+def _card(chunk: dict, is_dup: bool, cards: dict | None = None) -> str:
     dup_cls = " dup" if is_dup else ""
     dup_badge = '<span class="dup-badge">\U0001f501 duplicate</span>' if is_dup else ""
     sprite = chunk["sprite_url"] or ""
     img = f'<img class="sprite" src="{html.escape(sprite)}"/>' if sprite else '<div class="sprite"></div>'
     pct = max(2, min(100, round(chunk["score"] * 100)))
-    return (
+    card = (
         f'<div class="chunk-card{dup_cls}">{img}<div>'
         f'<div class="chunk-meta"><span class="rank-badge">#{chunk["rank"]}</span>'
         f'<span class="name-badge">{html.escape(chunk["name"])}</span>'
         f'<span class="gen-badge">Gen {chunk["generation"]}</span>'
-        f'<span class="type-badge">{html.escape(chunk["doc_type"])}</span>{dup_badge}</div>'
+        f'<span class="type-badge">{html.escape(chunk["doc_type"].replace("_", " "))}</span>{dup_badge}</div>'
         f'<div class="docid">{html.escape(chunk["doc_id"])}</div>'
         f'<div class="chunk-text">{html.escape(chunk["text"])}</div>'
         f'<div class="score-row"><div class="score-track">'
@@ -91,6 +105,25 @@ def _card(chunk: dict, is_dup: bool) -> str:
         f'<span class="score-num">{chunk["score"]:.3f}</span></div>'
         f'</div></div>'
     )
+    if cards is None:
+        return card
+    # Click to unfold the full card: whole source document (chunks are truncated) plus
+    # the Pokemon's current types and stats. Native <details>, no JS survives st.markdown.
+    return f'<details class="chunk-wrap"><summary>{card}</summary>{_full_card(chunk, cards)}</details>'
+
+
+def _full_card(chunk: dict, cards: dict) -> str:
+    doc = cards["by_id"].get(chunk["doc_id"])
+    full_text = doc["text"] if doc else chunk["text"]
+    sprite = chunk["sprite_url"] or ""
+    img = f'<img class="sprite-lg" src="{html.escape(sprite)}"/>' if sprite else '<div class="sprite-lg"></div>'
+    lines = [f'<div class="full-line"><span class="full-label">Gen {chunk["generation"]} document</span>'
+             f'{html.escape(full_text)}</div>']
+    for label, key in (("Types", "types"), ("Stats", "stats")):
+        extra = cards["by_name"].get(chunk["name"], {}).get(key)
+        if extra:
+            lines.append(f'<div class="full-line"><span class="full-label">{label}</span>{html.escape(extra)}</div>')
+    return f'<div class="full-card">{img}<div>{"".join(lines)}</div></div>'
 
 
 def mode_badge_html(state: dict) -> str:
@@ -99,14 +132,21 @@ def mode_badge_html(state: dict) -> str:
     return f'<span class="mode-badge">{html.escape(label)}</span>'
 
 
-def retrieval_panel_html(chunks: list[dict]) -> str:
-    """Render retrieved chunks as cards on the Pokedex screen, flagging repeated doc_ids."""
+def retrieval_panel_html(chunks: list[dict], cards: dict | None = None) -> str:
+    """Render retrieved chunks as cards on the Pokedex screen, flagging repeated doc_ids.
+
+    The panel shows PANEL_K chunks per search but the agent only reads the top TOP_K,
+    so a cutoff line marks where the agent stops — what sits below it (the current
+    Steel chart at the cold open) is visible to the audience and invisible to the agent.
+    """
     if not chunks:
         return '<div class="dex-screen"><div class="chunk-text">No documents retrieved yet — ask a question.</div></div>'
     seen: set[str] = set()
-    cards = []
+    out: list[str] = []
     for c in chunks:
+        if c["rank"] == config.TOP_K + 1:  # ranks restart at 1 for each agent search
+            out.append(f'<div class="cutoff">▲ top {config.TOP_K} — all the agent reads</div>')
         is_dup = c["doc_id"] in seen
         seen.add(c["doc_id"])
-        cards.append(_card(c, is_dup))
-    return '<div class="dex-screen">' + "".join(cards) + "</div>"
+        out.append(_card(c, is_dup, cards))
+    return '<div class="dex-screen">' + "".join(out) + "</div>"

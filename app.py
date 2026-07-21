@@ -25,6 +25,21 @@ def _warm_models() -> bool:
     return True
 
 
+@st.cache_resource
+def _card_index() -> dict:
+    """Full documents for the click-to-unfold card: whole text by doc_id, plus each
+    Pokemon's current types and stats. Served from data/corpus_cache.json (first ever
+    run fetches PokeAPI, same cost ingest.py pays)."""
+    from helpers.corpus import build_corpus
+
+    docs = build_corpus()
+    by_name: dict[str, dict] = {}
+    for d in docs:
+        if d["doc_type"] in ("types", "stats") and d["is_current"]:
+            by_name.setdefault(d["name"], {})[d["doc_type"]] = d["text"]
+    return {"by_id": {d["doc_id"]: d for d in docs}, "by_name": by_name}
+
+
 st.set_page_config(page_title="Pokedex RAG", page_icon="🔴", layout="wide")
 st.markdown(ui.POKEDEX_CSS, unsafe_allow_html=True)
 st.markdown(ui.HEADER_HTML, unsafe_allow_html=True)
@@ -70,4 +85,5 @@ with panel_col:
         unsafe_allow_html=True,
     )
     last = st.session_state.history[-1] if st.session_state.history else None
-    st.markdown(ui.retrieval_panel_html(last["chunks"] if last else []), unsafe_allow_html=True)
+    st.markdown(ui.retrieval_panel_html(last["chunks"] if last else [], cards=_card_index()),
+                unsafe_allow_html=True)

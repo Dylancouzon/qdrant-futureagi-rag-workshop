@@ -84,7 +84,8 @@ def main():
         hit, dup = 0, 0.0
         for r, qv in zip(queries, qvec):
             top = client.query_points(SCALE_COLLECTION, query=qv, using=config.DENSE_WEAK,
-                                      limit=K, with_payload=["doc_id", "text"]).points
+                                      limit=K, with_payload=["doc_id", "text"],
+                                      search_params=models.SearchParams(exact=True)).points
             docs = [(h.payload["doc_id"], h.payload["text"]) for h in top]
             hit += int(any(d[0] in set(r["gold_doc_ids"]) for d in docs))
             dup += 1 - len(set(docs)) / len(docs) if docs else 0

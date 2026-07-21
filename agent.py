@@ -49,8 +49,11 @@ GROUNDING_PROMPT = (
     "You are a Pokedex assistant. Answer ONLY using the documents returned by the "
     "search_pokedex tool. The Pokemon games change across generations, so your own "
     "memory is NOT reliable — treat the retrieved documents as the single source of "
-    "truth. If the documents do not contain the answer, say you don't know. Cite the "
-    "name in brackets for every fact you state, e.g. [magnemite]."
+    "truth. Search with the user's own wording. NEVER put a Pokemon name in a search "
+    "unless it appears in the user's question or in documents you already retrieved — "
+    "do not guess a name from memory and search to confirm it. If the retrieved "
+    "documents do not clearly contain the answer, say you don't know. Cite the name "
+    "in brackets for every fact you state, e.g. [magnemite]."
 )
 
 # Cross-process retrieval switch. The notebook flips it with set_retrieval(); the Streamlit
@@ -79,6 +82,10 @@ def set_retrieval(*, mode: str | None = None, current_only: bool | None = None) 
         state["current_only"] = current_only
     _STATE_FILE.write_text(json.dumps(state))
 
+
+# Exact (non-ANN) search everywhere: negligible cost at 8-23k points, and live numbers
+# reproduce across rehearsals — HNSW graphs rebuild after dedup and shift borderline ranks.
+EXACT = models.SearchParams(exact=True)
 
 # The retrieval panel reads the chunks retrieved during a run. Single-user demo.
 _last_retrieval: list[dict] = []
@@ -118,7 +125,7 @@ def retrieve(query: str, *, mode: str | None = None, current_only: bool | None =
                 prefetch=[
                     models.Prefetch(query=embeddings.dense([query], config.MODEL_DENSE_STRONG,
                                     is_query=True)[0], using=config.DENSE_STRONG, limit=20,
-                                    filter=query_filter),
+                                    filter=query_filter, params=EXACT),
                     models.Prefetch(query=models.SparseVector(indices=sp[0], values=sp[1]),
                                     using=config.SPARSE, limit=20, filter=query_filter),
                 ],
@@ -135,6 +142,7 @@ def retrieve(query: str, *, mode: str | None = None, current_only: bool | None =
             collection_name=config.COLLECTION,
             query=embeddings.dense([query], model, is_query=True)[0],
             using=using, limit=limit, with_payload=True, query_filter=query_filter,
+            search_params=EXACT,
         ).points
 
     chunks = [
@@ -163,7 +171,10 @@ def _format_for_model(chunks: list[dict]) -> str:
 @tool
 def search_pokedex(query: str) -> str:
     """Search the Pokedex for documents relevant to the query. Returns cited chunks."""
-    return _format_for_model(retrieve(query))
+    # Fetch PANEL_K so the panel can show what sits just below the cutoff; the model
+    # only ever reads the top TOP_K.
+    chunks = retrieve(query, limit=config.PANEL_K)
+    return _format_for_model(chunks[: config.TOP_K])
 
 
 llm = ChatAnthropic(model=config.GENERATOR_MODEL, temperature=0)

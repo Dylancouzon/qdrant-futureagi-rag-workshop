@@ -7,18 +7,18 @@ Surfaces: **App** (Streamlit), **NB** (`workshop.ipynb`), **FI** (Future AGI), *
 | Time | Beat | Owner | Surface | Must land |
 |---|---|---|---|---|
 | 0:00-0:05 | Intro + one correct question | Dylan | App | Correct cited answer, retrieval panel visible |
-| 0:05-0:10 | Cold open: "Does Steel resist Ghost and Dark?" | Dylan | App | Wrong answer; stale `typechart-steel-gen5` wins retrieval |
+| 0:05-0:10 | Cold open: "Does Steel resist Ghost and Dark?" | Dylan | App | Wrong answer; stale `typechart-steel-gen5` fills the agent's top-5; current gen6 visible below the panel cutoff |
 | 0:10-0:14 | Trace + judge calibration | Rishav | FI | Cold-open trace on screen; custom judge marks it wrong |
 | 0:14-0:19 | Decay curve | Dylan | NB §1 | recall@5 falls 0.67 → 0.39 as the dex grows |
 | 0:19-0:28 | Fix #1: dedup | Dylan → Rishav | NB §2 → QUI → FI | duplicate rate 0.67 → 0.00; 22.9k → 8.4k points |
 | 0:28-0:35 | Fix #2: embedding migration | Dylan → Rishav | NB §3 → FI | MiniLM vs bge A/B: recall 0.64 → 1.00 |
-| 0:35-0:43 | Fix #3: hybrid + rerank | Dylan → Rishav | NB §4 → App → FI | recall 0.83 → 1.00; NDCG 0.63 → 0.82 |
+| 0:35-0:43 | Fix #3: hybrid + rerank | Dylan → Rishav | NB §4 → App → FI | recall 0.78 → 0.89; NDCG 0.61 → 0.77 |
 | 0:43-0:48 | Cold-open close: `is_current` filter | Dylan | NB §5 → App | corrected answer; metadata fixes staleness |
 | 0:48-0:51 | Multi-hop trace | Rishav | NB §6 → FI | two retriever spans from one compound question |
 | 0:51-0:57 | Experiments view | Rishav | FI | before/after scoreboard across the fixes |
 | 0:57-1:00 | Close + Q&A buffer | both | n/a | measure → locate layer → fix → re-measure |
 
-If running late: skip the `group_by` cell in fix #1, shorten the 0:51 recap, compress fix #2 to flip → score → commit, then skip the second Web UI look after dedup. Keep the multi-hop trace and cold-open close.
+If running late: shorten the 0:51 recap, compress fix #2 to flip → score → commit, then skip the second Web UI look after dedup. Keep the multi-hop trace and cold-open close.
 
 ## Expected Numbers
 
@@ -31,16 +31,19 @@ Verified 2026-07-21 on the full-dex corpus. If a live number is wildly off, use 
 | Fix #1 | duplicate rate 0.67 → 0.00; `pokemon_webinar` 22,946 → 8,416; `pokemon_viz` 240 → 95 |
 | Fix #1 demo query (Gengar) | duplicate rate@5 0.80 → 0.00 (all five slots are `gengar-gen1-types` copies) |
 | Fix #2 | n=14; MiniLM recall@5 0.64 → bge 1.00 |
-| Fix #3 | n=18; recall 0.83 → 1.00; NDCG@5 0.63 → 0.82; MRR 0.57 → 0.76 |
-| Fix #3 attribution | sparse widens recall@20 0.89 → 0.94; fusion-only top-5 drops to 0.72; ColBERT rerank delivers the win |
-| Cold open | stale Gen 5 chart wins until the `is_current` filter; Gen 6 wins after |
+| Fix #3 | n=18; recall 0.78 → 0.89; NDCG@5 0.61 → 0.77; MRR 0.55 → 0.73 |
+| Fix #3 attribution | pool at rank 20 holds the gold doc for 0.94 of queries; fusion-only top-5 drops to 0.72 (below pure dense 0.78); the ColBERT rerank delivers the win |
+| Cold open | stale Gen 5 chart wins until the `is_current` filter; Gen 6 wins after. Baseline panel on the steel search: 8 stale copies, current gen6 at rank 9 below the cutoff |
 
-Demo queries:
+App demo queries, with what actually changes on screen (verified 2026-07-21):
 
-- Fix #1: `Tell me the Pokedex entry for Gengar`
-- Fix #2: `the electric mouse Pokemon that stores electricity in the pouches on its cheeks`
-- Fix #3: `A Pokemon that lives in dark caves and uses sound waves to navigate and hunt.`
+- Fix #1: `Tell me the Pokedex entry for Gengar` — before: top-5 is five copies of one doc; after: five distinct documents. Answer visibly richer.
+- Fix #2: `the electric mouse Pokemon that stores electricity in the pouches on its cheeks` — ANSWER FLIPS: before, MiniLM's top-5 is all lookalikes and the agent names the wrong one (Pichu); after, it says Pikachu. Re-verify the exact wrong name at the dry run.
+- Fix #3: `A Pokemon that lives in dark caves and uses sound waves to navigate and hunt.` — no answer flip (several bats genuinely match); the tell is the panel filling with echolocation bats and the scored A/B.
+- Cold-open close: `Does the Steel type resist Ghost and Dark attacks?` — answer flip: wrong "yes" → correct "no".
 - Multi-hop: `What does Drowzee eat, and is that Pokemon weak to Bug-type attacks?`
+
+Worth saying out loud at fix #2: the grounding prompt forbids the agent from guessing a name and searching to confirm it. An unconstrained agent masks retrieval rot that way — the answer stays right while retrieval decays, and only traces and evals show the cost.
 
 ## Pre-Show Checklist
 
@@ -64,6 +67,7 @@ Demo queries:
 ## Rehearsal Gates
 
 - Run `verify_arc.py` before the dry run. It is destructive; restore afterward.
+- Retrieval now uses exact search (deterministic numbers). The decay curve and the baseline rows above predate that change: re-run `scaling_curve.py` once and refresh any expected number `verify_arc.py` moves.
 - Save the successful executed notebook as the backup.
 - Bookmark a rehearsal trace where the Drowzee question produces two-plus retriever spans.
 - Check `pokemon_viz` in Qdrant Cloud: duplicate clusters should be visible before dedup and thinner after.

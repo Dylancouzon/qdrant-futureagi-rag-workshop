@@ -79,7 +79,7 @@ def build_points(docs, gold_ids) -> list[dict]:
             copies = dup_copies(doc["doc_id"])
         # Over-chunk flavor text into tiny fragments (fix #1); keep short factual docs
         # (types/stats/type_chart) whole so the conflict evidence isn't truncated.
-        if doc["doc_type"] == "flavor":
+        if doc["doc_type"] == "pokedex_entry":
             chunks = chunking.chunk_text(
                 doc["text"], chunking.BROKEN_CHUNK_CHARS, chunking.BROKEN_OVERLAP_CHARS
             )
