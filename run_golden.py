@@ -7,7 +7,8 @@ platform scores the traces; the Experiments view compares the runs. The retrieva
 state is whatever the notebook last set; this script never changes it.
 
 Also writes data/golden_run-{mode}.jsonl (query, expected_answer, answer, retrieved
-doc_ids) so answers can be mapped to platform runs. Full set takes a few minutes.
+doc_ids, and retrieved_context — the exact text the model read, as one string, ready
+for fi.evals.evaluate(context=...)). Full set takes a few minutes.
 
     uv run python run_golden.py                        # all 37 queries
     uv run python run_golden.py --group fix2_embedding # one slice
@@ -20,6 +21,7 @@ import json
 from pathlib import Path
 
 import agent
+from helpers import config
 
 DATA = Path(__file__).resolve().parent / "data"
 
@@ -44,6 +46,8 @@ def main() -> None:
                 "query": r["query"], "exercises": r["exercises"],
                 "expected_answer": r["expected_answer"], "answer": answer,
                 "retrieved_doc_ids": [c["doc_id"] for c in chunks],
+                # exactly what the model read, as the one context string FI evals expect
+                "retrieved_context": agent._format_for_model(chunks[: config.TOP_K]),
             }) + "\n")
             print(f"[{i}/{len(rows)}] {r['query'][:60]}")
     print(f"wrote {out.name}; traces exported to Future AGI project pokedex-rag")

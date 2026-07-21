@@ -38,12 +38,13 @@ with Build outcomes, Build outcomes wins).
 stages; 2 queries whose gold docs post-date Gen 1 are excluded from the curve, not from
 scoring) · dedup dup-rate 0.67→0.00 (22,946→8,416 pts; viz 240→95) · fix2 WIN post-dedup
 (n=14): MiniLM 0.64 → bge 1.00 — commit, don't roll back; the A/B still carries the
-"measure first" lesson · fix3 on top of bge (n=18): recall 0.83→1.00, NDCG 0.63→0.82,
-MRR 0.57→0.76; attribution: sparse widens the candidate pool (recall@20 0.89→0.94),
-fusion WITHOUT rerank scores worse at top-5 (0.72) than pure dense (0.83), the ColBERT
+"measure first" lesson · fix3 on top of bge (n=18, re-measured after the exact-search +
+panel commit b2441e1): recall 0.78→0.89, NDCG 0.61→0.77, MRR 0.55→0.73; attribution:
+sparse widens the candidate pool (pool at rank 20 holds the gold doc for 0.94 of queries),
+fusion WITHOUT rerank scores worse at top-5 (0.72) than pure dense (0.78), the ColBERT
 rerank delivers the win — "prefetch and rerank are a pipeline" · **hybrid's dense arm is
-bge** (arm A/B on the deduped mid-state: 0.89 vs 0.61 with a MiniLM arm; the final
-verified pipeline scores 1.00 above) — the fixes compose instead of contradicting ·
+bge** (arm A/B on the deduped mid-state: 0.89 vs 0.61 with a MiniLM arm) — the fixes
+compose instead of contradicting ·
 cold open: the stale gen5 Steel chart outranks gen6 at baseline AND after dedup+bge+hybrid,
 so the `is_current` filter is genuinely the only fix · baseline flaws all red (fix1 dup 0.67,
 fix2 recall 0.64, fix3 NDCG 0.22, cold open wrong; `verify_arc.py --baseline-only`) ·
@@ -108,9 +109,11 @@ override the plan where they conflict:
   filter. Verified: wrong answer at baseline → correct after the filter.
 - **All three fixes carry scored wins on the full-dex corpus (fourth pass).** Dedup (#1)
   duplicate-rate 0.67 → 0.00 (22,946 → 8,416 points). Migration (#2) recall 0.64 → 1.00
-  (n=14). Hybrid+rerank (#3) on top of bge: recall 0.83 → 1.00, NDCG 0.63 → 0.82,
-  MRR 0.57 → 0.76 (n=18); sparse widens the candidate pool (recall@20 0.89 → 0.94) and
-  the ColBERT rerank converts it — fusion without the rerank scores WORSE at top-5 (0.72).
+  (n=14). Hybrid+rerank (#3) on top of bge: recall 0.78 → 0.89, NDCG 0.61 → 0.77,
+  MRR 0.55 → 0.73 (n=18, current numbers after the exact-search commit b2441e1); sparse
+  widens the candidate pool (holds the gold doc at rank 20 for 0.94 of queries) and the
+  ColBERT rerank converts it — fusion without the rerank scores WORSE at top-5 (0.72,
+  below pure dense 0.78).
   The hybrid pipeline's dense arm is bge, so the fixes compose: dedup → migrate → hybrid.
 - **Fix #2 flipped from cautionary beat to genuine win when the corpus became the full
   dex.** On the 151-species corpus MiniLM won and the migration regressed (0.91 → 0.73,

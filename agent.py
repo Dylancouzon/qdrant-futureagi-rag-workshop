@@ -1,15 +1,14 @@
-"""The agentic RAG agent, camera-visible. Qdrant retrieval + LangGraph, calls verbatim.
+"""The Pokedex agent: a LangGraph ReAct agent with one tool — Qdrant search.
 
-A LangGraph ReAct agent with one tool: Pokedex search backed by Qdrant. The agent decides
-when to search, can search more than once (multi-hop), and cites its sources. A strict
-grounding prompt keeps it from answering from the model's own memory. Only retrieved
-documents are authoritative, because the games change across generations.
+The agent decides when to search, can search more than once for compound questions, and
+cites its sources. A strict grounding prompt stops it from answering from the model's own
+memory: Pokemon facts change across game generations, so only retrieved documents count.
 
-All retrieval goes through `retrieve()`. Its **mode** is what each workshop fix changes:
-`minilm` (broken baseline) → `bge` (fix #2 migration) → `hybrid` (fix #3 dense+sparse+
-rerank), plus a `current_only` payload filter (the cold-open close). The mode is stored in
-a file so the notebook can flip it and the running Streamlit app picks it up on the next
-question, and the audience returns to the chat UI and sees the agent answer better.
+Every workshop fix changes ONE thing here: how `retrieve()` searches. The retrieval mode
+goes `minilm` (baseline) → `bge` (fix #2, stronger model) → `hybrid` (fix #3, dense +
+sparse + rerank), plus a `current_only` filter that closes the cold open. The mode lives
+in a small state file, so the notebook flips it and the running Streamlit app picks it up
+on the next question.
 """
 
 from __future__ import annotations
@@ -30,17 +29,19 @@ from helpers import config, embeddings
 
 load_dotenv()
 
-# Tracing (Future AGI): registering here, not in the notebook, means every process that
-# runs the agent is traced: the notebook, the Streamlit app, and the rehearsal scripts.
-# traceAI auto-instruments LangGraph, so Qdrant retrieval shows up as retriever spans
-# with no manual span code.
-if os.getenv("FI_API_KEY"):
+# Future AGI tracing. Two lines: register a project, instrument LangChain. Because it
+# runs at import, every process that uses the agent is traced — the notebook, the
+# Streamlit app, and the rehearsal scripts. traceAI auto-instruments LangGraph, so each
+# Qdrant search shows up as a retriever span with no manual span code.
+if os.getenv("FI_API_KEY") and os.getenv("FI_SECRET_KEY"):
     from fi_instrumentation import register
     from fi_instrumentation.fi_types import ProjectType
     from traceai_langchain import LangChainInstrumentor
 
     trace_provider = register(project_type=ProjectType.OBSERVE, project_name="pokedex-rag")
     LangChainInstrumentor().instrument(tracer_provider=trace_provider)
+elif os.getenv("FI_API_KEY") or os.getenv("FI_SECRET_KEY"):
+    print("Future AGI tracing OFF: set both FI_API_KEY and FI_SECRET_KEY in .env")
 
 client = QdrantClient(url=os.environ["QDRANT_URL"], api_key=os.environ["QDRANT_API_KEY"],
                       timeout=60)
@@ -73,18 +74,23 @@ def retrieval_state() -> dict:
     return _read_state()
 
 
+MODES = ("minilm", "bge", "hybrid")
+
+
 def set_retrieval(*, mode: str | None = None, current_only: bool | None = None) -> None:
     """Flip the agent's retrieval behavior (persisted for the app). Called by the notebook."""
     state = _read_state()
     if mode is not None:
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         state["mode"] = mode
     if current_only is not None:
         state["current_only"] = current_only
     _STATE_FILE.write_text(json.dumps(state))
 
 
-# Exact (non-ANN) search everywhere: negligible cost at 8-23k points, and live numbers
-# reproduce across rehearsals — HNSW graphs rebuild after dedup and shift borderline ranks.
+# Exact search instead of approximate: it costs nothing at this collection size, and the
+# live numbers reproduce exactly from rehearsal to show.
 EXACT = models.SearchParams(exact=True)
 
 # The retrieval panel reads the chunks retrieved during a run. Single-user demo.
@@ -104,6 +110,8 @@ def retrieve(query: str, *, mode: str | None = None, current_only: bool | None =
     """Retrieve from Qdrant. `mode` selects the pipeline each workshop fix upgrades to."""
     state = _read_state()
     mode = mode or state["mode"]
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
     current_only = state["current_only"] if current_only is None else current_only
 
     # Cold-open close: keep only current documents (the payload-filter fix).
@@ -114,34 +122,42 @@ def retrieve(query: str, *, mode: str | None = None, current_only: bool | None =
         ])
 
     if mode == "hybrid":
-        # Fix #3: one multi-stage call: dense + sparse prefetch, fused RRF, ColBERT rerank.
-        # The dense arm is bge (the fix #2 migration target): the arm A/B on the deduped
-        # mid-state scored 0.89 (bge) vs 0.61 (MiniLM); the final verified arc reaches
-        # recall@5 1.00 on the hard set with this pipeline.
-        sp = embeddings.sparse([query], is_query=True)[0]
+        # Fix #3, one query_points call: dense + sparse candidates, fused with RRF,
+        # then reranked by ColBERT. The dense arm is bge, so this builds on fix #2.
+        dense_query = embeddings.dense([query], config.MODEL_DENSE_STRONG, is_query=True)[0]
+        indices, values = embeddings.sparse([query], is_query=True)[0]
+        colbert_query = embeddings.colbert([query], is_query=True)[0]
+
+        candidates = models.Prefetch(
+            prefetch=[
+                models.Prefetch(query=dense_query, using=config.DENSE_STRONG,
+                                limit=20, filter=query_filter, params=EXACT),
+                models.Prefetch(query=models.SparseVector(indices=indices, values=values),
+                                using=config.SPARSE, limit=20, filter=query_filter),
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            limit=20,
+        )
         hits = client.query_points(
             collection_name=config.COLLECTION,
-            prefetch=[models.Prefetch(
-                prefetch=[
-                    models.Prefetch(query=embeddings.dense([query], config.MODEL_DENSE_STRONG,
-                                    is_query=True)[0], using=config.DENSE_STRONG, limit=20,
-                                    filter=query_filter, params=EXACT),
-                    models.Prefetch(query=models.SparseVector(indices=sp[0], values=sp[1]),
-                                    using=config.SPARSE, limit=20, filter=query_filter),
-                ],
-                query=models.FusionQuery(fusion=models.Fusion.RRF), limit=20,
-            )],
-            query=embeddings.colbert([query], is_query=True)[0],
-            using=config.COLBERT, limit=limit, with_payload=True,
+            prefetch=[candidates],
+            query=colbert_query,
+            using=config.COLBERT,
+            limit=limit,
+            with_payload=True,
         ).points
     else:
-        # Baseline / fix #2: single dense query on the small (MiniLM) or large (bge) vector.
+        # Baseline and fix #2: one dense query against the small (minilm) or large (bge)
+        # named vector. Fix #2 is literally this `using` switch.
         model = config.MODEL_DENSE_STRONG if mode == "bge" else config.MODEL_DENSE_WEAK
         using = config.DENSE_STRONG if mode == "bge" else config.DENSE_WEAK
         hits = client.query_points(
             collection_name=config.COLLECTION,
             query=embeddings.dense([query], model, is_query=True)[0],
-            using=using, limit=limit, with_payload=True, query_filter=query_filter,
+            using=using,
+            limit=limit,
+            with_payload=True,
+            query_filter=query_filter,
             search_params=EXACT,
         ).points
 
@@ -159,10 +175,9 @@ def retrieve(query: str, *, mode: str | None = None, current_only: bool | None =
 
 
 def _format_for_model(chunks: list[dict]) -> str:
-    # The generator cites by name and never sees the generation. Generation is payload
-    # metadata for filtering, not an answer signal. If the model saw it in the text, doc_id,
-    # or a label, it would silently disambiguate stale-vs-current documents and the
-    # cold-open conflict would never surface. The human panel still shows generation badges.
+    # The model sees name + text only, never the generation tag. If it saw the tag it
+    # could tell stale documents from current ones on its own, and the cold-open failure
+    # would never happen. The app's retrieval panel still shows generation badges.
     if not chunks:
         return "No documents found."
     return "\n".join(f"[{c['name']}] {c['text']}" for c in chunks)

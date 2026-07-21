@@ -1,6 +1,6 @@
 # Qdrant × Future AGI: Agentic RAG Workshop
 
-Live workshop demo for an agentic RAG system whose retrieval quality decays as the corpus grows. The flow: observe the failure in the app, diagnose it in Future AGI, fix the retrieval layer in Qdrant, and re-measure.
+Live workshop demo for an agentic RAG system whose retrieval quality gets worse as the corpus grows. The flow: show the failure in the app, diagnose it in Future AGI, fix retrieval in the Qdrant vector search engine, and measure again.
 
 Corpus: all 1,025 Pokémon from [PokéAPI](https://pokeapi.co), with realistic re-crawl duplication and one stale type-chart document.
 
@@ -24,7 +24,7 @@ FI_API_KEY
 FI_SECRET_KEY
 ```
 
-Create a free cluster at [Qdrant Cloud](https://cloud.qdrant.io) (v1.18+) and put its URL and API key in `.env`.
+Create a free cluster at [Qdrant Cloud](https://cloud.qdrant.io) (v1.18+) and add its URL and API key to `.env`.
 
 ## Build Or Restore
 
@@ -41,7 +41,7 @@ After a rehearsal, notebook run, or destructive verification:
 uv run python snapshot.py restore
 ```
 
-`restore` prefers the cluster snapshot that `prep.py` created and falls back to the newest local `data/{collection}-*.snapshot`. Use `snapshot.py download` to save cluster snapshots locally and `snapshot.py backup` to snapshot the current cluster state. Snapshot files are gitignored.
+`restore` uses the cluster snapshot created by `prep.py` when it can. If that is missing, it uses the newest local `data/{collection}-*.snapshot`. Use `snapshot.py download` to save cluster snapshots locally and `snapshot.py backup` to snapshot the current cluster state. Snapshot files are gitignored.
 
 After restore, confirm the app starts from the broken baseline:
 
@@ -58,7 +58,7 @@ uv run streamlit run app.py
 
 Open `workshop.ipynb` in your IDE and select the `.venv` kernel.
 
-Use the app for audience-facing questions. Use the notebook to apply each fix. The app reads the file-backed retrieval switch on every question, so notebook changes show up on the next app request.
+Use the app for audience-facing questions and the notebook to apply each fix. The app reads the retrieval switch on every question, so notebook changes show up on the next app request.
 
 ## Future AGI Handoff
 
@@ -69,15 +69,15 @@ trace_provider = register(project_type=ProjectType.OBSERVE, project_name="pokede
 LangChainInstrumentor().instrument(tracer_provider=trace_provider)
 ```
 
-With `FI_API_KEY` and `FI_SECRET_KEY` set, the app, notebook, and rehearsal scripts export traces to the `pokedex-rag` project. Qdrant retrieval appears as retriever spans.
+With `FI_API_KEY` and `FI_SECRET_KEY` set, the app, notebook, and rehearsal scripts send traces to the `pokedex-rag` project. Qdrant retrieval appears as retriever spans.
 
-To produce a scored run, run the golden set through the traced agent:
+To create a scored run, send the golden set through the traced agent:
 
 ```bash
 uv run python run_golden.py
 ```
 
-It uses the agent's current retrieval state, so run it once per fix stage (baseline, dedup, bge, hybrid, filter) and compare the runs in Experiments. It also writes `data/golden_run-{mode}.jsonl` with the answers.
+It uses the agent's current retrieval state. Run it once per stage (baseline, dedup, bge, hybrid, filter), then compare the runs in Experiments. It also writes `data/golden_run-{mode}.jsonl` with each answer and its `retrieved_context`: the exact text the model read, as one string, ready for `fi.evals.evaluate(context=...)`.
 
 Shared eval dataset: `data/golden_dataset.jsonl`.
 
@@ -99,7 +99,7 @@ Recommended dashboard anchors:
 | Fix #3 hybrid + rerank | `NDCG@K`, `MRR`, `Recall@K` |
 | Handoffs | `context_relevance` + `chunk_utilization` + `groundedness` |
 
-Measured SDK behavior so far: `groundedness` can stay green through retrieval failures because a grounded refusal passes; `context_relevance` dips on dense misses but does not collapse; `chunk_utilization` measures answer use of retrieved context, not duplication.
+Measured SDK behavior so far: `groundedness` can stay green during retrieval failures because a grounded refusal passes; `context_relevance` dips on dense misses but does not collapse; `chunk_utilization` measures how the answer uses retrieved context, not whether retrieval was duplicated.
 
 Open Future AGI integration items:
 
@@ -109,12 +109,12 @@ Open Future AGI integration items:
 
 ## Fixes
 
-The retrieval mode is controlled by `agent.set_retrieval(...)` and persisted in `data/.retrieval_state.json`.
+The retrieval mode is controlled by `agent.set_retrieval(...)` and saved in `data/.retrieval_state.json`.
 
 1. **Dedup**: delete duplicate points. Top-5 duplicate rate drops 0.67 → 0.00; `pokemon_webinar` shrinks 22.9k → 8.4k points.
-2. **Embedding migration**: add `bge-large` as a named vector, A/B against MiniLM, then commit. Clone-crowded recall moves 0.64 → 1.00.
-3. **Hybrid + rerank**: dense + sparse prefetch, RRF fusion, ColBERT rerank in one `query_points` call. Hard paraphrase recall moves 0.78 → 0.89.
-4. **Freshness filter**: `is_current` removes the stale type-chart document that retrieval improvements cannot beat.
+2. **Embedding migration**: add `bge-large` as a named vector, A/B against MiniLM, then commit. Recall on lookalike-species queries moves 0.64 → 1.00.
+3. **Hybrid + rerank**: dense + sparse prefetch, RRF fusion, and ColBERT rerank in one `query_points` call. Recall on hard paraphrase queries moves 0.78 → 0.89.
+4. **Freshness filter**: `is_current` removes the stale type-chart document that better ranking alone cannot beat.
 
 Local FastEmbed models: `all-MiniLM-L6-v2`, `BAAI/bge-large-en-v1.5`, `Qdrant/minicoil-v1`, `colbert-ir/colbertv2.0`.
 
@@ -123,7 +123,7 @@ Local FastEmbed models: `all-MiniLM-L6-v2`, `BAAI/bge-large-en-v1.5`, `Qdrant/mi
 | Path | Role |
 |---|---|
 | `app.py` | Streamlit chat UI + retrieval panel |
-| `agent.py` | LangGraph agent, Qdrant retrieval, tracing, grounding |
+| `agent.py` | LangGraph agent, Qdrant retrieval, Future AGI tracing, grounding |
 | `workshop.ipynb` | live fixes, one section each |
 | `ingest.py` / `prep.py` | flawed ingest, vector backfill, snapshots |
 | `run_golden.py` | golden set through the traced agent, once per stage |
