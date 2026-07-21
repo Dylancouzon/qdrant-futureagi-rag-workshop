@@ -11,7 +11,7 @@ Gold docs (referenced by the golden set) are kept single-copy so duplicates are 
 distractors — otherwise dedup would raise Precision@K instead of lowering it.
 
     uv run python ingest.py                  # full broken baseline
-    uv run python ingest.py --limit 20       # quick smoke ingest (first 20 Pokemon)
+    uv run python ingest.py --limit 20       # quick smoke ingest (20 Pokemon)
 """
 
 from __future__ import annotations
@@ -134,7 +134,7 @@ def create_and_fill(client: QdrantClient, collection: str, points: list[dict]) -
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--limit", type=int, default=None, help="first N Pokemon only (smoke test)")
+    ap.add_argument("--limit", type=int, default=None, help="N Pokemon, alphabetical (smoke test)")
     args = ap.parse_args()
 
     load_dotenv()

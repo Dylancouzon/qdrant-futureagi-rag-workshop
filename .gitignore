@@ -7,3 +7,4 @@ data/corpus_cache.json
 data/.retrieval_state.json
 .DS_Store
 *.snapshot
+data/golden_run-*.jsonl
