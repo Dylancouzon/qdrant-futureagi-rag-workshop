@@ -20,14 +20,13 @@ import os
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import tool
+# traceAI-langchain requires langchain<0.4, so the agent uses langgraph's
+# create_react_agent; switch to langchain.agents.create_agent when Future AGI
+# supports langchain 1.x.
+from langgraph.prebuilt import create_react_agent
 from qdrant_client import QdrantClient, models
 
 from helpers import config, embeddings
-
-try:
-    from langchain.agents import create_agent  # langchain >= 1.0
-except ImportError:
-    from langgraph.prebuilt import create_react_agent as create_agent
 
 load_dotenv()
 
@@ -37,10 +36,11 @@ load_dotenv()
 # with no manual span code.
 if os.getenv("FI_API_KEY"):
     from fi_instrumentation import register
+    from fi_instrumentation.fi_types import ProjectType
     from traceai_langchain import LangChainInstrumentor
 
-    register(project_name="pokedex-rag")
-    LangChainInstrumentor().instrument()
+    trace_provider = register(project_type=ProjectType.OBSERVE, project_name="pokedex-rag")
+    LangChainInstrumentor().instrument(tracer_provider=trace_provider)
 
 client = QdrantClient(url=os.environ["QDRANT_URL"], api_key=os.environ["QDRANT_API_KEY"],
                       timeout=60)
@@ -108,15 +108,16 @@ def retrieve(query: str, *, mode: str | None = None, current_only: bool | None =
 
     if mode == "hybrid":
         # Fix #3: one multi-stage call: dense + sparse prefetch, fused RRF, ColBERT rerank.
-        # The dense arm stays on MiniLM: fix #2 measured the bigger model as no better on
-        # this corpus, and hybrid scores identically with either arm (verified).
+        # The dense arm is bge (the fix #2 migration target): the arm A/B on the deduped
+        # mid-state scored 0.89 (bge) vs 0.61 (MiniLM); the final verified arc reaches
+        # recall@5 1.00 on the hard set with this pipeline.
         sp = embeddings.sparse([query], is_query=True)[0]
         hits = client.query_points(
             collection_name=config.COLLECTION,
             prefetch=[models.Prefetch(
                 prefetch=[
-                    models.Prefetch(query=embeddings.dense([query], config.MODEL_DENSE_WEAK,
-                                    is_query=True)[0], using=config.DENSE_WEAK, limit=20,
+                    models.Prefetch(query=embeddings.dense([query], config.MODEL_DENSE_STRONG,
+                                    is_query=True)[0], using=config.DENSE_STRONG, limit=20,
                                     filter=query_filter),
                     models.Prefetch(query=models.SparseVector(indices=sp[0], values=sp[1]),
                                     using=config.SPARSE, limit=20, filter=query_filter),
@@ -166,13 +167,16 @@ def search_pokedex(query: str) -> str:
 
 
 llm = ChatAnthropic(model=config.GENERATOR_MODEL, temperature=0)
-agent = create_agent(llm, [search_pokedex], prompt=GROUNDING_PROMPT)
+agent = create_react_agent(llm, [search_pokedex], prompt=GROUNDING_PROMPT)
 
 
-def ask(question: str) -> tuple[str, list[dict]]:
-    """Run the agent on a question. Returns (answer, retrieved chunks for the panel)."""
+def ask(question: str, history: list[dict] | None = None) -> tuple[str, list[dict]]:
+    """Run the agent on a question, with prior chat turns so follow-ups resolve
+    ("is it weak to Bug?"). `history` is [{"role": "user"|"assistant", "content": ...}].
+    Returns (answer, retrieved chunks for the panel)."""
     reset_retrieval()
-    result = agent.invoke({"messages": [("user", question)]})
+    messages = list(history or [])[-8:] + [{"role": "user", "content": question}]
+    result = agent.invoke({"messages": messages})
     answer = result["messages"][-1].content
     return answer, get_retrieval()
 

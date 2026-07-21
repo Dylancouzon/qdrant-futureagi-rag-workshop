@@ -6,9 +6,10 @@ fragment across several points — the fragmentation half of fix #1.
 
 from __future__ import annotations
 
-# Tiny on purpose: fragments short flavor text into multiple points (the broken state).
-BROKEN_CHUNK_CHARS = 45
-BROKEN_OVERLAP_CHARS = 15
+# Small on purpose: splits flavor text (~150-250 chars) into 2-3 truncated points — a
+# plausible bad config, not a cartoon. The broken state fix #1 exposes.
+BROKEN_CHUNK_CHARS = 110
+BROKEN_OVERLAP_CHARS = 25
 
 
 def chunk_text(text: str, size: int, overlap: int) -> list[str]:
@@ -36,8 +37,10 @@ def chunk_text(text: str, size: int, overlap: int) -> list[str]:
 
 
 if __name__ == "__main__":
-    # ponytail: check tiny chunking actually fragments a flavor-length string.
-    s = "Drowzee: Puts enemies to sleep then eats their dreams. Occasionally gets sick."
+    # ponytail: check the broken chunk size actually fragments a flavor-length string.
+    s = ("Charizard: Spits fire that is hot enough to melt boulders. "
+         "Known to cause forest fires unintentionally. When expelling a blast of "
+         "superhot fire, the red flame at the tip of its tail burns more intensely.")
     cs = chunk_text(s, BROKEN_CHUNK_CHARS, BROKEN_OVERLAP_CHARS)
     assert len(cs) >= 2, cs
     assert all(len(c) <= BROKEN_CHUNK_CHARS + 15 for c in cs), cs

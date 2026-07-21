@@ -2,15 +2,15 @@
 
 Ships the day-one flaws the workshop fixes live:
   - weak embeddings   : one named dense vector from all-MiniLM-L6-v2 (384d)   -> fix #2
-  - duplicates        : distractor docs re-ingested N times (overlapping crawls) -> fix #1
-  - fragmentation     : tiny chunk size shreds flavor text into many points     -> fix #1
+  - duplicates        : distractor docs re-ingested 1-8x (overlapping crawls)  -> fix #1
+  - fragmentation     : small chunk size splits flavor text across points      -> fix #1
   - dense-only        : no sparse, no reranker vectors                          -> fix #3
   - no payload index  : generation is not indexed for filtering                 -> cold-open close
 
 Gold docs (referenced by the golden set) are kept single-copy so duplicates are pure
 distractors — otherwise dedup would raise Precision@K instead of lowering it.
 
-    uv run python ingest.py                  # full broken baseline (~10k points)
+    uv run python ingest.py                  # full broken baseline
     uv run python ingest.py --limit 20       # quick smoke ingest (first 20 Pokemon)
 """
 
@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -29,24 +30,33 @@ from helpers.corpus import build_corpus
 
 GOLDEN_PATH = Path(__file__).resolve().parent / "data" / "golden_dataset.jsonl"
 
-# Distractor docs are ingested this many times to simulate overlapping re-crawls.
-BROKEN_DUP_FACTOR = 6
 UPSERT_BATCH = 256
 
-# Stale documents whose facts changed in a later generation. Heavily re-ingested to model
-# outdated pages that accumulated from old crawls and were never cleaned up, so they crowd
-# the current doc out of the top-k. The generation payload filter (arc step 7) removes them.
+# Re-crawl duplication is skewed in real systems: most pages get copied once or twice,
+# a few popular ones pile up. Seeded per doc_id so every ingest is identical.
+DUP_CHOICES = [1] * 35 + [2] * 25 + [3] * 15 + [4] * 10 + [6] * 10 + [8] * 5  # avg ~2.7
+
+
+def dup_copies(doc_id: str) -> int:
+    return random.Random(doc_id).choice(DUP_CHOICES)
+
+
+# Stale documents whose facts changed in a later generation. Pinned to the top of the
+# duplication tail (old popular pages recrawled for years) so they reliably crowd the
+# current doc out of the top-k. The is_current payload filter (arc step 7) removes them.
 STALE_CONFLICT_DOC_IDS = {
     "typechart-steel-gen5",   # primary cold open: still lists Ghost/Dark resistances
     "magnemite-gen1-types",
     "magneton-gen1-types",
 }
-CONFLICT_DUP_FACTOR = 12
+CONFLICT_COPIES = max(DUP_CHOICES)
 
 # Small sibling collection for the Qdrant Web UI point-cloud beat: recognizable Pokemon,
 # same broken duplication, sized so the Visualize tab's sample shows the duplicate
 # clusters honestly. The notebook dedups it alongside the main collection.
-VIZ_POKEMON = ["pikachu", "charizard", "bulbasaur", "squirtle", "eevee"]
+# Snorlax and Gengar draw high skewed dup factors (6x clusters), so the duplicate
+# clusters in the Visualize tab stay obvious; Charizard rolls low but stays for recognition.
+VIZ_POKEMON = ["pikachu", "charizard", "bulbasaur", "squirtle", "eevee", "snorlax", "gengar"]
 
 
 def load_gold_doc_ids() -> set[str]:
@@ -57,16 +67,16 @@ def load_gold_doc_ids() -> set[str]:
     return ids
 
 
-def build_points(docs, gold_ids, dup_factor) -> list[dict]:
-    """Chunk every doc; emit distractor docs dup_factor times, gold docs once."""
+def build_points(docs, gold_ids) -> list[dict]:
+    """Chunk every doc; emit distractor docs 1-8 times (skewed), gold docs once."""
     points = []
     for doc in docs:
         if doc["doc_id"] in STALE_CONFLICT_DOC_IDS:
-            copies = CONFLICT_DUP_FACTOR
+            copies = CONFLICT_COPIES
         elif doc["doc_id"] in gold_ids:
             copies = 1
         else:
-            copies = dup_factor
+            copies = dup_copies(doc["doc_id"])
         # Over-chunk flavor text into tiny fragments (fix #1); keep short factual docs
         # (types/stats/type_chart) whole so the conflict evidence isn't truncated.
         if doc["doc_type"] == "flavor":
@@ -81,6 +91,7 @@ def build_points(docs, gold_ids, dup_factor) -> list[dict]:
                     "doc_id": doc["doc_id"],
                     "name": doc["name"],
                     "generation": doc["generation"],
+                    "intro_gen": doc["intro_gen"],
                     "doc_type": doc["doc_type"],
                     "sprite_url": doc["sprite_url"],
                     "text": chunk,
@@ -124,7 +135,6 @@ def create_and_fill(client: QdrantClient, collection: str, points: list[dict]) -
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None, help="first N Pokemon only (smoke test)")
-    ap.add_argument("--dup-factor", type=int, default=BROKEN_DUP_FACTOR)
     args = ap.parse_args()
 
     load_dotenv()
@@ -138,8 +148,8 @@ def main() -> None:
         docs = [d for d in docs if d["name"] in keep or d["doc_type"] == "type_chart"]
 
     gold_ids = load_gold_doc_ids()
-    points = build_points(docs, gold_ids, args.dup_factor)
-    print(f"docs: {len(docs)}  ->  points: {len(points)} (dup_factor={args.dup_factor})")
+    points = build_points(docs, gold_ids)
+    print(f"docs: {len(docs)}  ->  points: {len(points)} (skewed dup, avg ~2.7)")
 
     # Broken baseline: a SINGLE weak dense vector. No strong vector, no sparse, no colbert,
     # no payload index — every fix adds one of these live (the cluster is v1.18, so prep.py
@@ -148,7 +158,7 @@ def main() -> None:
 
     # The Web UI point-cloud collection: same broken duplication, a handful of Pokemon.
     viz_docs = [d for d in docs if d["name"] in VIZ_POKEMON]
-    create_and_fill(client, config.VIZ_COLLECTION, build_points(viz_docs, gold_ids, args.dup_factor))
+    create_and_fill(client, config.VIZ_COLLECTION, build_points(viz_docs, gold_ids))
 
     # Reset the agent's retrieval switch to the broken baseline. Without this, a rehearsal
     # that ended in hybrid+filter mode would silently make the cold open answer correctly.

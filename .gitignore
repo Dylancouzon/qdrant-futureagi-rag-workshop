@@ -6,3 +6,4 @@ __pycache__/
 data/corpus_cache.json
 data/.retrieval_state.json
 .DS_Store
+*.snapshot

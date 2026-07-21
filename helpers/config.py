@@ -7,7 +7,7 @@ agree on vector names and models. The workshop's whole story depends on it.
 from pathlib import Path
 
 # Qdrant collection the whole workshop runs against.
-COLLECTION = "pokemon_workshop"
+COLLECTION = "pokemon_webinar"
 
 # Small sibling collection for the Qdrant Web UI point-cloud beat (fix #1). Sized so the
 # Visualize tab's sample is near-complete and the duplicate clusters actually show.

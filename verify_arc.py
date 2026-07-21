@@ -2,10 +2,11 @@
 
 Measures the golden set at every stage of the arc — baseline -> dedup -> strong embedding
 -> hybrid+rerank -> is_current filter — and prints the metric that each fix is supposed
-to move. DESTRUCTIVE (dedup deletes points, the filter adds an index); re-run
-`ingest.py && prep.py` afterwards to restore the broken baseline for the demo.
+to move. DESTRUCTIVE (dedup deletes points, the filter adds an index); revert with
+`snapshot.py restore` afterwards. It refuses to run without a snapshot on the cluster.
 
-    uv run python verify_arc.py
+    uv run python verify_arc.py                  # full arc (destructive)
+    uv run python verify_arc.py --baseline-only  # non-destructive: flaws show red?
 
 These are retrieval proxies (computed from gold labels); the scored evals run on the
 Future AGI platform. If a number here doesn't move, the beat won't move on the dashboard.
@@ -13,6 +14,7 @@ Future AGI platform. If a number here doesn't move, the beat won't move on the d
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
@@ -71,7 +73,7 @@ def ndcg_mrr(rows, **kw):
 
 
 def dup_rate(rows, **kw):
-    """Fraction of top-k slots that are redundant (repeat a (doc_id, chunk_index))."""
+    """Fraction of top-k slots that are redundant (repeat a (doc_id, text))."""
     rates = []
     for r in rows:
         chunks = _hits(r["query"], **kw)[:K]
@@ -92,12 +94,20 @@ def cold_open_correct(**kw):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--baseline-only", action="store_true",
+                    help="stop after the baseline read (non-destructive pre-show check)")
+    args = ap.parse_args()
+
     load_dotenv()
     # Reset the switch first: retrieve() falls back to file state for current_only, so a
     # leftover rehearsal state (hybrid + filter) would silently corrupt every baseline number.
     agent.set_retrieval(mode="minilm", current_only=False)
     client = QdrantClient(url=os.environ["QDRANT_URL"], api_key=os.environ["QDRANT_API_KEY"],
                           timeout=120)
+    if not args.baseline_only and not client.list_snapshots(config.COLLECTION):
+        raise SystemExit("No snapshot on the cluster. Run `uv run python snapshot.py backup` "
+                         "first — this script deletes points and needs a restore point.")
     fix2 = load("fix2_embedding")
     fix3 = load("fix3_hybrid")
     fix1 = load("fix1_dedup")
@@ -109,6 +119,8 @@ def main():
     n3, m3 = ndcg_mrr(fix3, mode="minilm")
     print(f"  fix3 NDCG@{K} / MRR (entity, MiniLM):      {n3:.2f} / {m3:.2f}")
     print(f"  cold open correct (MiniLM):               {cold_open_correct(mode='minilm')}")
+    if args.baseline_only:
+        return
 
     print("\n" + "=" * 64)
     print("FIX #1 — dedup the collection")
@@ -120,17 +132,17 @@ def main():
     print(f"  fix1 duplicate-rate@{K}: {dup_rate(fix1, mode='minilm'):.2f}  (was crowded, now unique)")
 
     print("\n" + "=" * 64)
-    print("FIX #2 — try migrating weak -> strong embedding (cautionary: measure first)")
-    print(f"  fix2 recall@{K}: small {recall_at_k(fix2, mode='minilm'):.2f}  ->  large {recall_at_k(fix2, mode='bge'):.2f}")
-    print("  (expected to REGRESS on this corpus — the model was never the bottleneck; roll back)")
+    print("FIX #2 — migrate weak -> strong embedding (zero-downtime, measured first)")
+    print(f"  fix2 recall@{K}: MiniLM {recall_at_k(fix2, mode='minilm'):.2f}  ->  bge {recall_at_k(fix2, mode='bge'):.2f}")
+    print("  (on the full dex the 384d model can't separate the clone Pokemon; bge can)")
 
     print("\n" + "=" * 64)
-    print("FIX #3 — hybrid + ColBERT rerank (baseline = current weak dense)")
-    nw, mw = ndcg_mrr(fix3, mode="minilm")
+    print("FIX #3 — hybrid + ColBERT rerank (baseline = bge, the fix #2 state)")
+    nw, mw = ndcg_mrr(fix3, mode="bge")
     nh, mh = ndcg_mrr(fix3, mode="hybrid")
-    print(f"  fix3 NDCG@{K}: dense {nw:.2f} -> hybrid {nh:.2f}")
-    print(f"  fix3 MRR:     dense {mw:.2f} -> hybrid {mh:.2f}")
-    print(f"  fix3 recall@{K}: dense {recall_at_k(fix3, mode='minilm'):.2f} -> hybrid {recall_at_k(fix3, mode='hybrid'):.2f}")
+    print(f"  fix3 NDCG@{K}: bge {nw:.2f} -> hybrid {nh:.2f}")
+    print(f"  fix3 MRR:     bge {mw:.2f} -> hybrid {mh:.2f}")
+    print(f"  fix3 recall@{K}: bge {recall_at_k(fix3, mode='bge'):.2f} -> hybrid {recall_at_k(fix3, mode='hybrid'):.2f}")
 
     print("\n" + "=" * 64)
     print("COLD-OPEN CLOSE — is_current payload filter")
@@ -140,7 +152,7 @@ def main():
         pass
     print(f"  cold open correct: hybrid {cold_open_correct(mode='hybrid')}  ->  "
           f"hybrid+filter {cold_open_correct(mode='hybrid', current_only=True)}")
-    print("\nDone. Run `uv run python ingest.py && uv run python prep.py` to restore the baseline.")
+    print("\nDone. Run `uv run python snapshot.py restore` to revert to the baseline.")
 
 
 if __name__ == "__main__":

@@ -1,67 +1,116 @@
 # Qdrant × Future AGI: Agentic RAG Workshop
 
-A live demo of an agentic RAG system that worked on a small corpus and decayed as it grew. We watch answer quality slide, find the retrieval problem behind each drop, fix that layer in Qdrant, and prove the fix on Future AGI. Corpus: Gen-1 Pokémon from [PokéAPI](https://pokeapi.co). Full design in `CLAUDE.md`.
+A live demo of an agentic RAG system that decayed as its corpus grew. The audience watches answer quality slide, finds the failing retrieval layer on Future AGI's dashboard, fixes that layer in Qdrant, and sees the score recover. Corpus: all 1,025 Pokémon from [PokéAPI](https://pokeapi.co), with realistic re-crawl duplication baked in.
+
+- **How the hour runs** (beats, timings, expected numbers, fallbacks): `RUNBOOK.md`
+- **Design rationale and verified measurements**: `CLAUDE.md`
 
 ## Setup
 
 ```bash
-uv sync                       # Python 3.12, pinned
+uv sync
 cp .env.example .env          # fill in the five keys
 ```
 
-`.env` needs `QDRANT_URL`, `QDRANT_API_KEY`, `ANTHROPIC_API_KEY`, `FI_API_KEY`, `FI_SECRET_KEY`.
+`.env` needs `QDRANT_URL`, `QDRANT_API_KEY` (Qdrant Cloud, v1.18+), `ANTHROPIC_API_KEY`, `FI_API_KEY`, `FI_SECRET_KEY` (Future AGI).
 
-## Build the demo collection
+## 1 · Build the Collections
 
-These commands touch the live Qdrant collections. `ingest.py` and `prep.py` build the show state; `verify_arc.py` intentionally changes it and must be followed by a restore.
+Already done on the shared cluster, so you can skip to Start. On a fresh cluster:
 
 ```bash
-uv run python ingest.py           # broken-on-purpose baseline (~10k points) in Qdrant Cloud
-uv run python prep.py             # OFFLINE: add + backfill strong-dense, sparse, ColBERT
-uv run python scaling_curve.py    # OFFLINE: the 500/2k/10k decay curve (opening hook)
-uv run python check_baseline.py   # rehearsal gate: confirm each flaw shows red
-uv run python verify_arc.py       # rehearsal gate: confirm each fix moves its metric (destructive)
+uv run python ingest.py       # broken-on-purpose baseline + pokemon_viz
+uv run python prep.py         # backfill the fix vectors, then snapshot both collections
 ```
 
-`ingest.py` creates the flaws: small embeddings, duplicate and fragmented chunks, dense-only retrieval, and no payload index. It also builds the small `pokemon_viz` collection for the Web UI point-cloud beat and resets the agent's retrieval switch to the broken baseline. `prep.py` uses Qdrant 1.18's `create_vector_name` to add the fix vectors to the live collection with zero downtime, then backfills them, so the only live action on stage is flipping the agent's retrieval mode. `verify_arc.py` is destructive because dedup deletes points; re-run `ingest.py && prep.py` after it to restore the baseline.
+`prep.py` ends by snapshotting the finished state on the cluster, so every later destructive step is revertible. The backfill is resumable: if the encoder process dies partway, rerun `prep.py` and it continues where it stopped.
 
-## Run
+## 2 · Start
 
 ```bash
 uv run streamlit run app.py               # Pokédex chat UI + retrieval panel
 uv run jupyter lab workshop.ipynb         # the fixes, one section each
 ```
 
+Ask the app any Pokémon question. The notebook performs the fixes against the live collection; the app picks up each fix on the next question.
+
+## 3 · Restore
+
+After anything destructive (the notebook's dedup, `verify_arc.py`, a rehearsal), revert both collections to the show-ready baseline in seconds:
+
+```bash
+uv run python snapshot.py restore
+```
+
+`restore` prefers the [snapshot](https://qdrant.tech/documentation/snapshots/) stored on the cluster and falls back to the newest local `data/{collection}-*.snapshot` file. `snapshot.py download` saves the cluster snapshots to `data/`; `snapshot.py backup` re-snapshots the current state. Snapshot files are gitignored (the main one is 462 MB).
+
+After a restore, check `data/.retrieval_state.json` reads `{"mode": "minilm", "current_only": false}`. The full pre-show checklist is in `RUNBOOK.md`.
+
+## Where Future AGI Plugs In
+
+**Tracing is already wired.** `agent.py` registers Future AGI tracing at import:
+
+```python
+trace_provider = register(project_type=ProjectType.OBSERVE, project_name="pokedex-rag")
+LangChainInstrumentor().instrument(tracer_provider=trace_provider)
+```
+
+With `FI_API_KEY` set, every process that runs the agent (the Streamlit app, the notebook, the rehearsal scripts) exports traces to the **`pokedex-rag`** project, with Qdrant retrieval as retriever spans. There is no separate tracing setup step.
+
+**The golden set is the shared eval dataset.** `data/golden_dataset.jsonl`, 37 queries, one JSON object per line:
+
+| Field | Meaning |
+|---|---|
+| `query` | the question the agent gets |
+| `expected_answer` | known-good answer (the cold-open custom judge scores against this) |
+| `gold_doc_ids` | doc-level gold labels for IR metrics. Stable across re-ingest and re-embed; never point ids |
+| `exercises` | which beat the query exercises: `cold_open`, `fix1_dedup`, `fix2_embedding`, `fix3_hybrid`, `multi_hop` |
+| `notes` | selection evidence (measured ranks that qualified the query) |
+
+**Evals per beat** (the notebook prints local gold-label checks; judged scores live on your dashboard, never in our UI):
+
+| Beat | Platform eval |
+|---|---|
+| Cold open | custom LLM judge vs `expected_answer` (a stale-but-cited answer passes groundedness, so groundedness can't score this) |
+| Fix #1 dedup | `chunk_utilization` + the retrieval panel visual |
+| Fix #2 migration | `Recall@K` + `context_relevance` |
+| Fix #3 hybrid + rerank | `NDCG@K`, `MRR`, `Recall@K` |
+| Every handoff | the triad read: `context_relevance` + `chunk_utilization` + `groundedness` → retrieval problem or generation problem |
+
+**Measured SDK behavior to anchor dashboard reads** (via `ai-evaluation`, `model="turing_flash"`, context passed as one string): `groundedness` stays green through retrieval failures because a grounded "I don't know" passes; `context_relevance` dips on a dense miss but never collapses; `chunk_utilization` scores the answer's use of context, not duplication.
+
+**Open items for the Future AGI team:**
+
+1. How platform dataset runs present the triad vs standalone SDK calls, and which anchors each beat's dashboard read.
+2. Gold-label format for IR metrics on the platform (our canonical format is the JSONL described in the preceding table; we'll write a converter to whatever the platform expects).
+3. The Experiments view setup for the before/after scoreboard (RUNBOOK beat at 0:51).
+
+## The Fixes
+
+The agent's retrieval mode is a file-backed switch (`agent.set_retrieval`). The notebook flips it; the app reads it on each question and shows the active mode as a badge.
+
+1. **Dedup**: delete duplicate points. Duplicate rate in the top-5 drops 0.67 → 0.00; the collection shrinks 22.9k → 8.4k points.
+2. **Embedding migration**: add `bge-large` as a named vector on the live collection (zero downtime), A/B both models on the golden set, and commit: the 384d model stopped separating the clone Pokémon once the dex grew to 1,025 species (recall 0.64 → 1.00). The same one-line flip rolls back if the number goes the other way.
+3. **Hybrid + rerank**: one multi-stage `query_points` call: dense (bge) + sparse (miniCOIL) prefetch, RRF fusion, ColBERT rerank. Takes the hard paraphrase set from recall 0.83 to 1.00 on top of the migrated model.
+4. **Cold-open close**: an `is_current` payload filter removes the stale type-chart document that dedup, the bigger model, and hybrid all failed to beat.
+
+Models (all local via FastEmbed): `all-MiniLM-L6-v2` (384d), `BAAI/bge-large-en-v1.5` (1024d), `Qdrant/minicoil-v1` sparse, `colbert-ir/colbertv2.0` rerank.
+
 ## Layout
 
 | Path | Role | On camera |
 |---|---|---|
-| `app.py` | Streamlit chat UI + retrieval panel | runs on screen |
-| `agent.py` | LangGraph agent: Qdrant retrieval, grounding, citations | shown |
-| `workshop.ipynb` | the fixes: dedup → embedding → hybrid+rerank → payload filter | shown |
-| `ingest.py` / `prep.py` | broken ingestion / live-add + offline vector backfill | never |
-| `scaling_curve.py` | offline 500/2k/10k decay curve → `data/scaling_curve.json` | never |
-| `check_baseline.py` / `verify_arc.py` | rehearsal gates: flaws show red / fixes move | never |
-| `helpers/` | PokéAPI, corpus, chunking, embeddings, UI, dedup | never |
+| `app.py` | Pokédex chat UI + retrieval panel | runs on screen |
+| `agent.py` | LangGraph agent: Qdrant retrieval, tracing, grounding | shown |
+| `workshop.ipynb` | the fixes, one section each | shown |
+| `ingest.py` / `prep.py` | broken ingestion / offline vector backfill + snapshot | never |
+| `snapshot.py` | backup/restore/download the show state | never |
+| `scaling_curve.py` | regenerates the decay-curve chart | never |
+| `verify_arc.py` | rehearsal gate: flaws red, fixes move (`--baseline-only` is non-destructive) | never |
+| `helpers/` | PokéAPI, chunking, embeddings, UI | never |
 | `data/golden_dataset.jsonl` | queries, expected answers, gold `doc_id`s | n/a |
-| `RUNBOOK.md` | run of show: timings, expected numbers, checklist, fallbacks | n/a |
-
-## The fixes
-
-The agent's retrieval mode is a small file-backed switch (`agent.set_retrieval`). The notebook flips it; the Streamlit app reads it on each question and shows the active mode as a badge, so the audience returns to the chat UI and sees the agent answer better after each fix.
-
-1. **Dedup**: delete duplicate points (`minilm` mode). Signal: duplicate rate in the top-5 (0.40 → 0.00 on the fix1 queries). The matching Future AGI dashboard read is being confirmed with Rishav — measured standalone, Chunk Utilization tracks the answer's use of context, not duplication (see `RUNBOOK.md`). Precision@K can't move honestly on this corpus; see `CLAUDE.md`.
-2. **Embedding migration → know when *not* to migrate.** Qdrant 1.18 adds the bge vector to the live collection with zero downtime; flip to `bge` mode. On this corpus the bigger model *regresses* recall because the bottleneck was duplicates, not the model. The lesson (measure on your data before you commit) is the beat; the rollback is one line.
-3. **Hybrid + rerank**: one multi-stage `query_points`: dense + sparse prefetch, RRF, ColBERT rerank (`hybrid` mode). Sparse means keyword-style matching; RRF means combining two ranked lists; ColBERT rerank means re-checking the best candidates token by token. The dense arm stays on MiniLM because hybrid scores the same with either model, which completes the fix-2 lesson. Signal on the 18 paraphrase queries: recall@5 0.06 → 0.94, NDCG@5 0.04 → 0.73, MRR 0.03 → 0.65 (sparse fusion starts the recovery, the ColBERT rerank surfaces the rest into the top-5).
-4. **Cold-open close**: `is_current` payload filter removes the stale document. Dedup and hybrid don't fix this one: the stale chart matches the question's wording, so it wins retrieval until metadata excludes it.
-
-Models: small `all-MiniLM-L6-v2` (384d), large `BAAI/bge-large-en-v1.5` (1024d), sparse miniCOIL, rerank `colbert-ir/colbertv2.0`. (mxbai was rejected: its high similarity floor collapsed under the duplicate crowding on this corpus.)
-
-## Apply this to your own data
-
-The workflow is the takeaway; the corpus is set dressing. To run it on your data: (1) build a golden set, meaning 20–50 real user queries with the documents that should answer them, keyed by a stable `doc_id` that survives re-ingestion; (2) trace your agent and read the retrieval-health metrics to find the failing layer before changing anything; (3) fix that layer in Qdrant: dedup at the source, A/B embedding models as named vectors on the live collection, upgrade to hybrid + rerank, and filter stale documents by payload; (4) re-run the same golden set after every change. A moving score on fixed queries proves the fix, and it also catches the fix that makes things worse (our fix #2).
 
 ## Notes
 
-- Cluster must be Qdrant **v1.18+** for the live named-vector add (`create_vector_name`).
+- `traceAI-langchain` requires `langchain<0.4`, so the agent uses `langgraph.prebuilt.create_react_agent`; switch to `langchain.agents.create_agent` when Future AGI supports langchain 1.x.
 - Nintendo IP: fine for a live demo, don't publish the corpus as a downloadable artifact.

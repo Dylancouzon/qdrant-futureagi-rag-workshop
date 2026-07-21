@@ -1,9 +1,10 @@
 """Pokedex chat UI — the audience-facing surface where the failure is experienced.
 
-Left: chat with the agent. Right: the retrieval panel showing exactly which chunks
-Qdrant returned for the last question — sprite, doc_id, generation, rank, similarity.
-The panel exposes each failure before any eval confirms it. Eval scores never appear
-here; they live on the Future AGI dashboard.
+Left: chat with the agent (multi-turn: prior turns are passed back to the agent).
+Right: the retrieval panel showing exactly which chunks Qdrant returned for the last
+question — sprite, doc_id, generation, rank, similarity. The panel exposes each failure
+before any eval confirms it. Eval scores never appear here; they live on the Future AGI
+dashboard. Theme: .streamlit/config.toml (light) + helpers/ui.py (Pokedex chrome).
 
     uv run streamlit run app.py
 """
@@ -26,8 +27,7 @@ def _warm_models() -> bool:
 
 st.set_page_config(page_title="Pokedex RAG", page_icon="🔴", layout="wide")
 st.markdown(ui.POKEDEX_CSS, unsafe_allow_html=True)
-st.markdown('<div class="pokedex-title">🔴 POKéDEX <span>Agentic RAG</span></div>',
-            unsafe_allow_html=True)
+st.markdown(ui.HEADER_HTML, unsafe_allow_html=True)
 
 with st.spinner("Loading embedding models…"):
     _warm_models()
@@ -38,19 +38,28 @@ if "history" not in st.session_state:
 chat_col, panel_col = st.columns([3, 2], gap="large")
 
 with chat_col:
-    for turn in st.session_state.history:
-        with st.chat_message("user"):
-            st.markdown(turn["question"])
-        with st.chat_message("assistant"):
-            st.markdown(turn["answer"])
+    # chat_input only pins to the page bottom at top level; inside a column it renders
+    # in source order, so keep a container above it for the messages.
+    messages = st.container()
+    with messages:
+        for turn in st.session_state.history:
+            with st.chat_message("user"):
+                st.markdown(turn["question"])
+            with st.chat_message("assistant", avatar="🔴"):
+                st.markdown(turn["answer"])
 
     question = st.chat_input("Ask the Pokedex…")
     if question:
-        with st.chat_message("user"):
-            st.markdown(question)
-        with st.chat_message("assistant"), st.spinner("Searching the Pokedex…"):
-            answer, chunks = ask(question)
-            st.markdown(answer)
+        past = [m for turn in st.session_state.history for m in (
+            {"role": "user", "content": turn["question"]},
+            {"role": "assistant", "content": turn["answer"]},
+        )]
+        with messages:
+            with st.chat_message("user"):
+                st.markdown(question)
+            with st.chat_message("assistant", avatar="🔴"), st.spinner("Searching the Pokedex…"):
+                answer, chunks = ask(question, history=past)
+                st.markdown(answer)
         st.session_state.history.append(
             {"question": question, "answer": answer, "chunks": chunks}
         )
@@ -61,5 +70,4 @@ with panel_col:
         unsafe_allow_html=True,
     )
     last = st.session_state.history[-1] if st.session_state.history else None
-    chunks = last["chunks"] if last else []
-    st.markdown(ui.retrieval_panel_html(chunks), unsafe_allow_html=True)
+    st.markdown(ui.retrieval_panel_html(last["chunks"] if last else []), unsafe_allow_html=True)

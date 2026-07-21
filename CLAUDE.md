@@ -1,6 +1,20 @@
 # Qdrant × Future AGI — Agentic RAG Workshop
 
-## Project status (last updated 2026-07-20, second pass)
+## Project status (last updated 2026-07-21, fourth pass — full-dex realism)
+
+**Fourth-pass changes (2026-07-21):** The corpus is now the **full Pokédex (1,025 species, 6,029 docs, all 9 generations)**, not Gen 1's 151. Duplication is **skewed per doc** (seeded on doc_id: 35% single copy, long tail to 8×, avg ~2.7×) instead of uniform 6×/12× — realistic re-crawl accumulation; the stale conflict docs pin the top of the tail. Chunks went 45 → 110 chars (still visibly truncates flavor text; no longer cartoonish). Collection renamed **`pokemon_webinar`**. The decay curve is now **real growth**: stages are the collection as it stood in each generation's era (a doc exists once its species is in the dex AND its facts have shipped), Gen 1 (1,314 pts) → Gen 1–4 (8,351) → full (22,946). Two story changes came out of re-measurement, both improvements: **fix #2 flipped from cautionary rollback to a genuine win** (recall 0.64 → 1.00; on the full dex MiniLM can't separate Pikachu from its ten later-gen clones — the original "growth exposed the model" framing is back), and **hybrid's dense arm is now bge** (the arm A/B on the deduped mid-state: 0.89 bge vs 0.61 MiniLM; the final verified pipeline reaches 1.00), so the fixes compose: dedup → migrate → hybrid on top. Golden set grew to **37 queries** (3 new clone-crowding fix2 queries, selection evidence in notes). `prep.py` backfill is now resumable (scrolls only points missing `dense_strong` — the encoder gets OOM-killed on long runs; rerun until it exits clean). The old `pokemon_workshop` collection is still on the cluster as a fallback — delete it once the new state survives a rehearsal.
+
+**Third-pass changes (2026-07-21):** Future AGI deps moved into the main dependency group
+(`uv sync` alone now installs tracing; the app's `ModuleNotFoundError` is gone). Locked
+constraint: **`traceAI-langchain` requires `langchain<0.4`**, so the stack is pinned to
+langchain 0.3.x / langgraph 0.6.x and the agent uses `create_react_agent` (switch to
+`langchain.agents.create_agent` when Future AGI supports langchain 1.x). Tracing setup
+updated to the current canonical form (`register(project_type=ProjectType.OBSERVE, …)` +
+`instrument(tracer_provider=…)`), verified live. `check_baseline.py` merged into
+`verify_arc.py --baseline-only`. New `snapshot.py backup|restore`: Qdrant collection
+snapshots replace re-running `ingest && prep` after destructive runs (create + recover
+verified live on the Cloud cluster; a downloaded `.snapshot` restores via
+`POST /collections/{name}/snapshots/upload?priority=snapshot`).
 
 **The workshop is built and verified end-to-end** against the live Qdrant Cloud cluster
 (v1.18.3). Read this block first, then `## Build outcomes` for the decisions that override
@@ -9,26 +23,33 @@ sections after that are the original design plan (kept for rationale; where they
 with Build outcomes, Build outcomes wins).
 
 **What exists and runs** (all verified live):
-- `helpers/` — PokéAPI corpus (1,515 docs), chunking, embeddings (+`warmup()`), UI, dedup, config.
-- `ingest.py` — broken-on-purpose baseline (weak dense only, duplicates, tiny chunks, no index) + the small `pokemon_viz` collection (5 recognizable Pokémon, 936 pts) for the Web UI point-cloud beat + resets the retrieval state file.
+- `helpers/` — PokéAPI corpus (6,029 docs, full dex, slimmed 5.3MB cache), chunking, embeddings (+`warmup()`), UI, dedup, config.
+- `ingest.py` — broken-on-purpose baseline (weak dense only, skewed duplicates, small chunks, no index) + the small `pokemon_viz` collection (7 recognizable Pokémon, 240 pts; Snorlax and Gengar carry the 6× clusters) for the Web UI point-cloud beat + resets the retrieval state file.
 - `prep.py` — offline: adds strong/sparse/ColBERT to the live collection (v1.18 `create_vector_name`) and backfills them.
 - `agent.py` — LangGraph agent, file-backed retrieval mode switch (`minilm`/`bge`/`hybrid` + `current_only`) the notebook flips and the app reads. **Registers Future AGI tracing at import**, so the notebook, the Streamlit app, and rehearsal scripts all export traces.
 - `app.py` + `helpers/ui.py` — Pokédex Streamlit chat UI + retrieval panel + retrieval-mode badge; warms all embedding models at boot. Passes a headless `AppTest` chat turn end-to-end.
 - `workshop.ipynb` — the fixes, one section each; triad narration rewritten to match measured judge behavior (see below).
-- `scaling_curve.py`, `check_baseline.py`, `verify_arc.py` — rehearsal gates (decay curve, flaws-show-red, fixes-move).
-- `data/golden_dataset.jsonl` — 34 queries: cold_open 1, fix1 3, fix2 11, fix3 18, multi_hop 1. The 15 new fix3 queries were LLM-mined paraphrases of gen-1 flavor text, kept only if weak-dense missed top-5 AND hybrid recovered top-5 on the deduped copy (notes field records both ranks).
+- `scaling_curve.py`, `verify_arc.py` (`--baseline-only` = non-destructive flaws-show-red check), `snapshot.py` — rehearsal gates + show-state backup/restore.
+- `data/golden_dataset.jsonl` — 37 queries: cold_open 1, fix1 3, fix2 14, fix3 18, multi_hop 1. The 15 mined fix3 queries were LLM-mined paraphrases of gen-1 flavor text (selection criterion in notes); the 3 newest fix2 queries are clone-crowding cases (MiniLM retrieves a later-gen lookalike, bge rank 1 — evidence in notes). Gold docs stay single-copy in every ingest.
 - `RUNBOOK.md` — run of show: beat timings, expected numbers, drop-order, pre-show checklist, fallbacks.
 
-**Verified arc (all re-measured this pass):** decay curve recall 0.78→0.62→0.28,
-dup-rate 0.21→0.33→0.38 at 500/2k/10k · dedup dup-rate 0.40→0.00 (10,325→~5.2k pts) ·
-fix2 REGRESSION post-dedup: MiniLM 0.91 vs bge 0.73 ("measure before you migrate" +
-zero-downtime rollback) · fix3 (n=18): recall 0.06→0.94, NDCG 0.04→0.73, MRR 0.03→0.65;
-attribution: fusion alone reaches recall 0.28, ColBERT rerank does the rest · **hybrid's
-dense arm is MiniLM** — measured identical to the bge arm (0.94 either way), which removes
-the fix2/fix3 story contradiction ("keep the small model, change the strategy") · cold
-open: the stale gen5 Steel chart outranks gen6 at baseline AND after dedup+hybrid (the
-question inherits the stale vocabulary), so the `is_current` filter is genuinely the only
-fix · baseline flaws all red in `check_baseline.py` (fix3 gold missed 17/18).
+**Verified arc (re-measured on the full-dex corpus, 2026-07-21):** decay curve recall
+0.67→0.45→0.39, dup-rate 0.44→0.51→0.52 at Gen 1 / Gen 1–4 / full dex (real growth
+stages; 2 queries whose gold docs post-date Gen 1 are excluded from the curve, not from
+scoring) · dedup dup-rate 0.67→0.00 (22,946→8,416 pts; viz 240→95) · fix2 WIN post-dedup
+(n=14): MiniLM 0.64 → bge 1.00 — commit, don't roll back; the A/B still carries the
+"measure first" lesson · fix3 on top of bge (n=18): recall 0.83→1.00, NDCG 0.63→0.82,
+MRR 0.57→0.76; attribution: sparse widens the candidate pool (recall@20 0.89→0.94),
+fusion WITHOUT rerank scores worse at top-5 (0.72) than pure dense (0.83), the ColBERT
+rerank delivers the win — "prefetch and rerank are a pipeline" · **hybrid's dense arm is
+bge** (arm A/B on the deduped mid-state: 0.89 vs 0.61 with a MiniLM arm; the final
+verified pipeline scores 1.00 above) — the fixes compose instead of contradicting ·
+cold open: the stale gen5 Steel chart outranks gen6 at baseline AND after dedup+bge+hybrid,
+so the `is_current` filter is genuinely the only fix · baseline flaws all red (fix1 dup 0.67,
+fix2 recall 0.64, fix3 NDCG 0.22, cold open wrong; `verify_arc.py --baseline-only`) ·
+post-dedup diversity failure measured: "Tell me about Gengar" top-5 = four generations'
+near-identical flavor for one species — distinct doc_ids, so dedup can't touch it; noted
+in the notebook as the `group_by`/MMR mention, not a scored beat.
 
 **Future AGI evals — measured self-serve via `ai-evaluation` (this pass):** registry
 identifiers confirmed: `context_relevance`, `chunk_utilization`, `chunk_attribution`,
@@ -42,21 +63,22 @@ scores the answer's use of context** (0.0 when the agent refuses), NOT duplicati
 Notebook narration was rewritten to only claim these measured behaviors. Ask Rishav how
 platform dataset runs differ from standalone SDK calls.
 
-**Known accepted tension:** fragmentation (45-char chunks) is planted but never fixed —
-dedup removes copies, not shredding. Load-bearing beats (cold open, multi-hop, fix3) answer
+**Known accepted tension:** fragmentation (110-char chunks) is planted but never fixed —
+dedup removes copies, not truncation. Load-bearing beats (cold open, multi-hop, fix3) answer
 correctly anyway because chunks carry `[name]` tags and type-chart docs are never chunked;
-the fix1 Charizard answer visibly says "cut off", which reads as broken data (good for the
+a flavor answer can still visibly read as cut off, which reads as broken data (good for the
 before-state). If a beat ever needs whole flavor text, the fix is a re-chunk + re-backfill,
 which is NOT stageable live.
 
-**Cluster note:** `pokemon_dedup_test` (~5.2k pts) is a deduped copy of the baseline with
-all vectors, used for offline scoring without touching the showtime collection. Rebuild by
-scrolling unique (doc_id, chunk_index) points with vectors; delete freely.
+**Cluster note:** the old `pokemon_workshop` collection (pre-rename corpus) is still on the
+cluster as a fallback; delete it once the new state survives a rehearsal. `pokemon_dedup_test`
+from the second pass is obsolete; delete freely.
 
 **What's next:** browser click-through of the app + the `pokemon_viz` Visualize beat
 (RUNBOOK gates) · Rishav confirms dashboard behavior of the triad on platform dataset runs
-+ the Experiments view for the decay curve · run `verify_arc.py` once before the dry run,
-then restore with `ingest.py && prep.py`.
++ the Experiments view for the decay curve · re-run the FI eval spot-checks on the new
+corpus retrievals (triad behavior was measured on the old corpus; behavior should hold —
+verify before the dry run) · delete `pokemon_workshop` after a clean rehearsal.
 
 ## What this is
 
@@ -84,24 +106,28 @@ override the plan where they conflict:
   generation or the gen-tagged doc_id), type-chart docs are not fragmented, and the stale
   Gen-5 chart is over-duplicated so it wins retrieval. Fix: a derived `is_current` payload
   filter. Verified: wrong answer at baseline → correct after the filter.
-- **Two scored fixes carry the numbers: dedup (#1) and hybrid+rerank (#3).** Verified
-  deltas (second pass): dedup duplicate-rate 0.40 → 0.00 (10.3k → 5.2k points); hybrid
-  recall 0.06 → 0.94, NDCG 0.04 → 0.73, MRR 0.03 → 0.65 on the 18 dense-miss paraphrase
-  queries (fusion alone reaches recall 0.28; the ColBERT rerank does the rest). The hybrid
-  pipeline's dense arm is MiniLM — measured identical to the bge arm.
-- **Fix #2 (embedding migration) is a cautionary beat, not a scored win.** On this corpus
-  the weak model (MiniLM) already wins; migrating to a strong model REGRESSES recall
-  (0.91 → 0.73), because the bottleneck was duplicates, not the model. The beat shows the
-  zero-downtime migration + A/B + one-line rollback, and teaches "measure on your data
-  before you commit." Strong model is `bge-large-en-v1.5` (mxbai collapsed under duplicate
-  crowding). bge queries need a manual instruction prefix (FastEmbed omits it).
+- **All three fixes carry scored wins on the full-dex corpus (fourth pass).** Dedup (#1)
+  duplicate-rate 0.67 → 0.00 (22,946 → 8,416 points). Migration (#2) recall 0.64 → 1.00
+  (n=14). Hybrid+rerank (#3) on top of bge: recall 0.83 → 1.00, NDCG 0.63 → 0.82,
+  MRR 0.57 → 0.76 (n=18); sparse widens the candidate pool (recall@20 0.89 → 0.94) and
+  the ColBERT rerank converts it — fusion without the rerank scores WORSE at top-5 (0.72).
+  The hybrid pipeline's dense arm is bge, so the fixes compose: dedup → migrate → hybrid.
+- **Fix #2 flipped from cautionary beat to genuine win when the corpus became the full
+  dex.** On the 151-species corpus MiniLM won and the migration regressed (0.91 → 0.73,
+  second pass); at 1,025 species the 384d model stops separating the clone Pokémon
+  (Togedemaru wins Pikachu's cheek-pouch query) and bge takes the set to 1.00. The beat
+  keeps the same skeleton — zero-downtime named-vector migration + A/B on the golden
+  set — but the verdict is now "commit"; the one-line rollback is narrated as what the
+  A/B protects if the number goes the other way. Strong model is `bge-large-en-v1.5`
+  (mxbai collapsed under duplicate crowding, second pass). bge queries need a manual
+  instruction prefix (FastEmbed omits it).
 - **Fix #1 is scored on chunk_utilization / duplicate-rate, not Precision@K** (Precision@K
   cannot move honestly here — single-gold caps it, multi-gold entity queries start at 1.0).
-- **Honest caveat (updated):** the corpus is easy for dense retrieval on entity queries,
-  which is why fix #2 regresses. The golden set is now 34 queries; the 15 mined fix-3
-  paraphrases were selected exactly where dense-only fails (selection criterion recorded
-  per query in the notes field), so fix #3's 0.06 → 0.94 measures that class of query,
-  not the whole corpus. Review the mined queries with Rishav before the show.
+- **Honest caveat (updated for the full dex):** entity-named queries are still easy for
+  any dense model; the scored sets deliberately target where models fail — the 15 mined
+  fix-3 paraphrases (selection criterion in notes) and the 3 clone-crowding fix-2 queries.
+  The deltas measure those classes of query, not the whole corpus. Review the mined
+  queries with Rishav before the show.
 
 ## North Star
 
@@ -272,13 +298,15 @@ Framework is locked (LangChain); in practice that means **LangGraph** for a mult
 tool-using agent — the same traceAI instrumentor covers LangGraph with a documented
 multi-step agent example, so the auto-tracing premise holds.
 
-## Build decisions (defaults — change here, not ad hoc in code)
+## Build decisions (original defaults — where these conflict with `helpers/config.py`
+## or Build outcomes, those win; the live source of truth is config.py)
 
 - **Qdrant**: Qdrant Cloud cluster (it's the product on stage; Web UI included). Client
   via `qdrant-client`. Env: `QDRANT_URL`, `QDRANT_API_KEY`.
 - **Embeddings**: all via FastEmbed, no embedding API keys. Weak model
   `sentence-transformers/all-MiniLM-L6-v2` (384d), strong model
-  `mixedbread-ai/mxbai-embed-large-v1` (1024d), reranker `colbert-ir/colbertv2.0` as a
+  `mixedbread-ai/mxbai-embed-large-v1` (1024d — SUPERSEDED: bge-large-en-v1.5, see Build
+  outcomes), reranker `colbert-ir/colbertv2.0` as a
   MAX_SIM multivector, plus a sparse model via FastEmbed for fix #3's hybrid prefetch
   (miniCOIL — Qdrant-differentiated — or BM25; confirm the exact FastEmbed identifier at
   build). Rehearsal must confirm the weak→strong Recall@K gap is real on our golden
@@ -287,11 +315,12 @@ multi-step agent example, so the auto-tracing premise holds.
   grounding prompt. Small is deliberate: fast on stage, and less prone to answering from
   memorized Pokémon knowledge instead of retrieved docs. If its tool-calling in the
   LangGraph agent proves shaky in rehearsal, step up to `claude-sonnet-5`.
-- **Corpus**: Gen 1's 151 Pokémon. Per Pokémon: flavor text per generation (the semantic
-  queries target these), types including `past_types`, base stats. Plus one type-chart
-  doc per generation. The scaling test grows this to ~10k points with injected duplicates;
-  the Qdrant Web UI point-cloud beat runs on a separate small collection, sized so its
-  Visualize sample is near-complete and the duplicate clusters show honestly.
+- **Corpus**: Gen 1's 151 Pokémon (SUPERSEDED: the full 1,025-species Pokédex, fourth
+  pass — real growth replaced injected scale). Per Pokémon: flavor text per generation
+  (the semantic queries target these), types including `past_types`, base stats. Plus one
+  type-chart doc per generation. The Qdrant Web UI point-cloud beat runs on a separate
+  small collection, sized so its Visualize sample is near-complete and the duplicate
+  clusters show honestly.
 - **Payload schema (every point)**: `doc_id` (stable, e.g. `magnemite-gen2-types`),
   `name`, `generation`, `doc_type` (`flavor|types|stats|type_chart`), `sprite_url`,
   `text`. Gold labels and the payload-filter fix both depend on this schema — it is not

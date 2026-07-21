@@ -4,6 +4,8 @@ Every document is a dict with exactly these keys (the payload schema from CLAUDE
     doc_id      stable id, e.g. "magnemite-gen2-types"  (gold labels reference this)
     name        Pokemon or type name
     generation  int 1..9 — the generation the document's facts describe
+    intro_gen   int 1..9 — the generation the species entered the Pokedex (1 for
+                type-chart docs). The scaling curve stages real growth on this.
     doc_type    "flavor" | "types" | "stats" | "type_chart"
     sprite_url  front sprite (empty for type_chart docs)
     text        the searchable/citable text
@@ -50,7 +52,7 @@ def _flavor_docs(pkmn: dict, species: dict) -> list[dict]:
     ]
 
 
-def _type_docs(pkmn: dict) -> list[dict]:
+def _type_docs(pkmn: dict, intro_gen: int) -> list[dict]:
     """Per-generation type docs, reconstructed from types + past_types.
 
     past_types lists the types a Pokemon HAD in a past generation; current types apply
@@ -67,7 +69,7 @@ def _type_docs(pkmn: dict) -> list[dict]:
         types = [t["type"]["name"] for t in past["types"]]
         docs.append(_one_type_doc(name, sprite, gen, types))
     current = [t["type"]["name"] for t in pkmn["types"]]
-    current_gen = max_past_gen + 1 if max_past_gen else 1
+    current_gen = max(max_past_gen + 1, intro_gen)
     docs.append(_one_type_doc(name, sprite, current_gen, current))
     return docs
 
@@ -86,7 +88,7 @@ def _one_type_doc(name: str, sprite: str, gen: int, types: list[str]) -> dict:
     }
 
 
-def _stats_doc(pkmn: dict) -> dict:
+def _stats_doc(pkmn: dict, intro_gen: int) -> dict:
     """Single current stats doc — PokeAPI exposes no past_stats, so no history."""
     name = pkmn["name"]
     stats = {s["stat"]["name"]: s["base_stat"] for s in pkmn["stats"]}
@@ -95,7 +97,7 @@ def _stats_doc(pkmn: dict) -> dict:
     return {
         "doc_id": f"{name}-stats",
         "name": name,
-        "generation": 1,
+        "generation": intro_gen,
         "doc_type": "stats",
         "sprite_url": pkmn["sprites"]["front_default"] or "",
         "text": f"{name.capitalize()} base stats: {parts}. Total: {total}.",
@@ -148,7 +150,7 @@ def _type_chart_docs(type_json: dict) -> list[dict]:
     return docs
 
 
-# The 18 types that appear across Gen 1 Pokemon (Fairy included — it's the retype target).
+# All 18 standard types (every type-chart doc the corpus carries).
 TYPE_NAMES = [
     "normal", "fire", "water", "electric", "grass", "ice", "fighting", "poison",
     "ground", "flying", "psychic", "bug", "rock", "ghost", "dragon", "steel",
@@ -158,15 +160,24 @@ TYPE_NAMES = [
 
 def build_corpus() -> list[dict]:
     """Fetch and assemble the full clean corpus (no duplicates, no chunking yet)."""
-    pokemon, species = pokeapi.fetch_gen1()
+    pokemon, species = pokeapi.fetch_pokedex()
     types = pokeapi.fetch_types(TYPE_NAMES)
     docs: list[dict] = []
     for pkmn, spec in zip(pokemon, species):
-        docs.extend(_flavor_docs(pkmn, spec))
-        docs.extend(_type_docs(pkmn))
-        docs.append(_stats_doc(pkmn))
+        intro_gen = pokeapi.gen_name_to_num(spec["generation"]["name"])
+        species_docs = (
+            _flavor_docs(pkmn, spec)
+            + _type_docs(pkmn, intro_gen)
+            + [_stats_doc(pkmn, intro_gen)]
+        )
+        for doc in species_docs:
+            doc["intro_gen"] = intro_gen
+        docs.extend(species_docs)
     for tjson in types.values():
-        docs.extend(_type_chart_docs(tjson))
+        chart_docs = _type_chart_docs(tjson)
+        for doc in chart_docs:
+            doc["intro_gen"] = 1  # charts are reference docs, present from the start
+        docs.extend(chart_docs)
 
     # is_current: only types / type_chart have superseded snapshots. Within each such
     # (name, doc_type) group the highest generation is current; older ones are stale.
@@ -188,10 +199,12 @@ if __name__ == "__main__":
     # ponytail: self-check that the corpus builds and the cold-open docs exist.
     corpus = build_corpus()
     by_type: dict[str, int] = {}
+    by_gen: dict[int, int] = {}
     for d in corpus:
-        assert set(d) == {"doc_id", "name", "generation", "doc_type", "sprite_url",
-                          "text", "is_current"}
+        assert set(d) == {"doc_id", "name", "generation", "intro_gen", "doc_type",
+                          "sprite_url", "text", "is_current"}
         by_type[d["doc_type"]] = by_type.get(d["doc_type"], 0) + 1
+        by_gen[d["intro_gen"]] = by_gen.get(d["intro_gen"], 0) + 1
     ids = {d["doc_id"] for d in corpus}
     assert len(ids) == len(corpus), "doc_ids must be unique"
     # Cold-open conflict must be present as two generation-tagged docs.
@@ -199,6 +212,7 @@ if __name__ == "__main__":
     # Steel type-chart fallback pair.
     assert "typechart-steel-gen5" in ids
     print(f"corpus: {len(corpus)} docs  {by_type}")
+    print(f"docs by intro_gen: {dict(sorted(by_gen.items()))}")
     for did in ["magnemite-gen1-types", "magnemite-gen2-types",
                 "typechart-steel-gen5", "drowzee-gen1-flavor"]:
         print(" ", next(d["text"] for d in corpus if d["doc_id"] == did))

@@ -1,7 +1,14 @@
-"""Streamlit UI plumbing — theme + retrieval-panel rendering. Camera never opens this file.
+"""Streamlit UI plumbing — Pokedex chrome + retrieval-panel rendering. Camera never opens this.
 
-Pokedex-themed: light, high contrast, large type, readable from across a room. The
-retrieval panel makes each failure visible BEFORE any score — duplicates repeating a
+The light theme itself lives in .streamlit/config.toml; this CSS only styles the custom
+Pokedex elements, so it never fights Streamlit's own widgets (the old global color
+override made typed text invisible in the chat input).
+
+All HTML is emitted WITHOUT newlines or leading indentation: st.markdown parses markdown
+even with unsafe_allow_html, and any line indented 4+ spaces becomes a code block, which
+is exactly how the panel broke.
+
+The retrieval panel makes each failure visible BEFORE any score — duplicates repeating a
 doc_id, a stale generation badge on the winning chunk, the right chunk ranked low.
 Hard rule: no eval scores here, ever. Similarity score is a retrieval signal, not a judgment.
 """
@@ -12,71 +19,78 @@ import html
 
 POKEDEX_CSS = """
 <style>
-  .stApp { background: #f5f6f8; }
-  h1, h2, h3, p, span, div, label { color: #1a1a2e !important; }
-  .pokedex-title {
-    background: #cc0000; color: #ffffff !important; padding: 14px 22px;
-    border-radius: 12px; font-weight: 800; font-size: 30px; letter-spacing: .5px;
-    border: 4px solid #7a0000; box-shadow: 0 4px 0 #7a0000; margin-bottom: 6px;
-  }
-  .pokedex-title span { color: #ffde00 !important; }
-  .panel-head { font-size: 20px; font-weight: 800; margin: 6px 0 10px; }
-  .chunk-card {
-    background: #ffffff; border: 3px solid #2a3a5e; border-radius: 12px;
-    padding: 10px 12px; margin-bottom: 10px; display: grid;
-    grid-template-columns: 64px 1fr; gap: 10px; align-items: center;
-  }
-  .chunk-card.dup { border-color: #e08a00; background: #fff8ec; }
-  .sprite { width: 64px; height: 64px; image-rendering: pixelated; }
-  .chunk-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 4px; }
-  .rank-badge { background: #2a3a5e; color: #fff !important; font-weight: 800;
-    border-radius: 6px; padding: 1px 8px; font-size: 14px; }
-  .name-badge { font-weight: 800; font-size: 17px; text-transform: capitalize; }
-  .gen-badge { background: #3b6ea5; color: #fff !important; border-radius: 6px;
-    padding: 1px 8px; font-size: 13px; font-weight: 700; }
-  .type-badge { background: #eef1f6; border: 1px solid #c7d0e0; border-radius: 6px;
-    padding: 1px 8px; font-size: 13px; }
-  .dup-badge { background: #e08a00; color: #fff !important; border-radius: 6px;
-    padding: 1px 8px; font-size: 13px; font-weight: 700; }
-  .mode-badge { background: #1a1a2e; color: #ffde00 !important; border-radius: 6px;
-    padding: 2px 10px; font-size: 14px; font-weight: 700; font-family: ui-monospace, monospace;
+  .dex-top { background: linear-gradient(#d92626, #b30000); border: 3px solid #7a0000;
+    border-radius: 14px; box-shadow: 0 5px 0 #7a0000; padding: 12px 20px;
+    display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  .dex-lens { width: 46px; height: 46px; border-radius: 50%; flex: none;
+    background: radial-gradient(circle at 35% 35%, #cfe9ff, #2f7fd1 55%, #10386b);
+    border: 3px solid #f2f2f2; box-shadow: inset 0 0 8px rgba(0,0,0,.45); }
+  .dex-led { width: 13px; height: 13px; border-radius: 50%; flex: none;
+    border: 2px solid rgba(0,0,0,.3); }
+  .dex-led.r { background: #ff5a5a; } .dex-led.y { background: #ffd83d; }
+  .dex-led.g { background: #4cd964; }
+  .dex-title { color: #ffffff; font-weight: 900; font-size: 27px; letter-spacing: 1.5px;
+    text-shadow: 0 2px 0 rgba(0,0,0,.35); margin-left: 6px; }
+  .dex-title span { color: #ffde00; font-size: 16px; letter-spacing: .5px; margin-left: 10px; }
+
+  .panel-head { font-size: 20px; font-weight: 800; color: #1a1a2e; margin: 4px 0 10px; }
+  .mode-badge { background: #1a1a2e; color: #ffde00; border-radius: 6px; padding: 2px 10px;
+    font-size: 14px; font-weight: 700; font-family: ui-monospace, monospace;
     vertical-align: middle; margin-left: 8px; }
-  .docid { font-family: ui-monospace, monospace; font-size: 13px; color: #55607a !important; }
-  .chunk-text { font-size: 15px; margin: 3px 0 5px; }
+
+  .dex-screen { background: #dde8d8; border: 3px solid #2a3a5e; border-radius: 12px;
+    padding: 10px; box-shadow: inset 0 2px 6px rgba(0,0,0,.15); }
+  .chunk-card { background: #ffffff; border: 2px solid #2a3a5e; border-radius: 10px;
+    padding: 10px 12px; margin-bottom: 8px; display: grid;
+    grid-template-columns: 64px 1fr; gap: 12px; align-items: center; }
+  .chunk-card.dup { border-color: #e08a00; background: #fff6e6; }
+  .sprite { width: 64px; height: 64px; image-rendering: pixelated; }
+  .chunk-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 3px; }
+  .rank-badge { background: #2a3a5e; color: #ffffff; font-weight: 800; border-radius: 6px;
+    padding: 1px 8px; font-size: 14px; }
+  .name-badge { font-weight: 800; font-size: 17px; text-transform: capitalize; color: #1a1a2e; }
+  .gen-badge { background: #3b6ea5; color: #ffffff; border-radius: 6px; padding: 1px 8px;
+    font-size: 13px; font-weight: 700; }
+  .type-badge { background: #eef1f6; border: 1px solid #c7d0e0; color: #37415c;
+    border-radius: 6px; padding: 1px 8px; font-size: 13px; }
+  .dup-badge { background: #e08a00; color: #ffffff; border-radius: 6px; padding: 1px 8px;
+    font-size: 13px; font-weight: 700; }
+  .docid { font-family: ui-monospace, monospace; font-size: 13px; color: #55607a; }
+  .chunk-text { font-size: 15px; color: #1a1a2e; margin: 3px 0 5px; }
   .score-row { display: flex; align-items: center; gap: 8px; }
   .score-track { flex: 1; height: 10px; background: #e6e9f0; border-radius: 5px; overflow: hidden; }
   .score-fill { height: 100%; background: #30a14e; }
-  .score-num { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 700; }
+  .score-num { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 700;
+    color: #1a1a2e; }
 </style>
 """
+
+HEADER_HTML = (
+    '<div class="dex-top"><div class="dex-lens"></div>'
+    '<div class="dex-led r"></div><div class="dex-led y"></div><div class="dex-led g"></div>'
+    '<div class="dex-title">POKéDEX <span>Agentic RAG · powered by Qdrant</span></div></div>'
+)
 
 
 def _card(chunk: dict, is_dup: bool) -> str:
     dup_cls = " dup" if is_dup else ""
-    dup_badge = '<span class="dup-badge">🔁 duplicate</span>' if is_dup else ""
+    dup_badge = '<span class="dup-badge">\U0001f501 duplicate</span>' if is_dup else ""
     sprite = chunk["sprite_url"] or ""
     img = f'<img class="sprite" src="{html.escape(sprite)}"/>' if sprite else '<div class="sprite"></div>'
     pct = max(2, min(100, round(chunk["score"] * 100)))
-    return f"""
-    <div class="chunk-card{dup_cls}">
-      {img}
-      <div>
-        <div class="chunk-meta">
-          <span class="rank-badge">#{chunk['rank']}</span>
-          <span class="name-badge">{html.escape(chunk['name'])}</span>
-          <span class="gen-badge">Gen {chunk['generation']}</span>
-          <span class="type-badge">{html.escape(chunk['doc_type'])}</span>
-          {dup_badge}
-        </div>
-        <div class="docid">{html.escape(chunk['doc_id'])}</div>
-        <div class="chunk-text">{html.escape(chunk['text'])}</div>
-        <div class="score-row">
-          <div class="score-track"><div class="score-fill" style="width:{pct}%"></div></div>
-          <span class="score-num">{chunk['score']:.3f}</span>
-        </div>
-      </div>
-    </div>
-    """
+    return (
+        f'<div class="chunk-card{dup_cls}">{img}<div>'
+        f'<div class="chunk-meta"><span class="rank-badge">#{chunk["rank"]}</span>'
+        f'<span class="name-badge">{html.escape(chunk["name"])}</span>'
+        f'<span class="gen-badge">Gen {chunk["generation"]}</span>'
+        f'<span class="type-badge">{html.escape(chunk["doc_type"])}</span>{dup_badge}</div>'
+        f'<div class="docid">{html.escape(chunk["doc_id"])}</div>'
+        f'<div class="chunk-text">{html.escape(chunk["text"])}</div>'
+        f'<div class="score-row"><div class="score-track">'
+        f'<div class="score-fill" style="width:{pct}%"></div></div>'
+        f'<span class="score-num">{chunk["score"]:.3f}</span></div>'
+        f'</div></div>'
+    )
 
 
 def mode_badge_html(state: dict) -> str:
@@ -86,13 +100,13 @@ def mode_badge_html(state: dict) -> str:
 
 
 def retrieval_panel_html(chunks: list[dict]) -> str:
-    """Render retrieved chunks as cards, flagging repeated doc_ids as duplicates."""
+    """Render retrieved chunks as cards on the Pokedex screen, flagging repeated doc_ids."""
     if not chunks:
-        return '<div class="chunk-text">No documents retrieved.</div>'
+        return '<div class="dex-screen"><div class="chunk-text">No documents retrieved yet — ask a question.</div></div>'
     seen: set[str] = set()
     cards = []
     for c in chunks:
         is_dup = c["doc_id"] in seen
         seen.add(c["doc_id"])
         cards.append(_card(c, is_dup))
-    return "".join(cards)
+    return '<div class="dex-screen">' + "".join(cards) + "</div>"
